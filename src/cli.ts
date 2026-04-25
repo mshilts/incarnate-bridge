@@ -101,7 +101,23 @@ function parseCommonOptions(args: string[]): CommonOptions {
       options.bootstrapLocal = true;
     }
   }
+  validateCommonOptions(options);
   return options;
+}
+
+function validateCommonOptions(options: CommonOptions) {
+  validateTcpPort(options.aiPort, "AI port");
+  validateTcpPort(options.wsPort, "browser bridge port", true);
+  if (!Number.isFinite(options.radius) || options.radius < 1) {
+    throw new Error("Invalid viewport radius.");
+  }
+}
+
+function validateTcpPort(port: number, label: string, allowZero = false) {
+  const minimum = allowZero ? 0 : 1;
+  if (!Number.isInteger(port) || port < minimum || port > 65535) {
+    throw new Error(`Invalid ${label}.`);
+  }
 }
 
 async function withTransport<T>(options: TransportOptions, action: (resolved: { host: string; port: number }) => Promise<T>) {
@@ -133,7 +149,13 @@ async function connectCommandSocket(host: string, port: number) {
     if (!trimmed) {
       return;
     }
-    const packet = JSON.parse(trimmed);
+    let packet: Record<string, unknown>;
+    try {
+      packet = JSON.parse(trimmed) as Record<string, unknown>;
+    } catch (error) {
+      socket.destroy(error instanceof Error ? error : new Error("Invalid JSON from command socket."));
+      return;
+    }
     const listeners = waiters.get(String(packet.type ?? ""));
     if (!listeners || listeners.length === 0) {
       return;

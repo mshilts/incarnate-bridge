@@ -1,4 +1,5 @@
 import { createServer } from "node:http";
+import { timingSafeEqual } from "node:crypto";
 import net from "node:net";
 import { WebSocketServer } from "ws";
 import { BROWSER_AI_COMMAND_TYPES } from "./protocol.js";
@@ -10,14 +11,19 @@ const BROWSER_MANAGED_ACCOUNT_COMMANDS = new Set([
     "account_add_key_begin"
 ]);
 const MAX_BROWSER_MESSAGE_BYTES = 64 * 1024;
+const MAX_WEBSOCKET_FRAME_BYTES = 1024 * 1024;
+const MAX_AI_LINE_BYTES = 1024 * 1024;
 export async function startBrowserBridgeServer(options) {
+    if (!options.sessionToken) {
+        throw new Error("Browser bridge session token must not be empty.");
+    }
     const httpServer = createServer();
-    const wsServer = new WebSocketServer({ server: httpServer });
+    const wsServer = new WebSocketServer({ server: httpServer, maxPayload: MAX_WEBSOCKET_FRAME_BYTES });
     let session = null;
     wsServer.on("connection", (socket, request) => {
         const token = new URL(request.url ?? "/", `http://${options.wsHost}:${options.wsPort}`).searchParams.get("token") ?? "";
         const origin = String(request.headers.origin ?? "");
-        if (token !== options.sessionToken) {
+        if (!constantTimeEqual(token, options.sessionToken)) {
             socket.close(1008, "Invalid bridge token.");
             return;
         }
@@ -180,6 +186,12 @@ class BridgeSession {
     }
     onAiData(chunk) {
         this.aiBuffer += chunk;
+        if (Buffer.byteLength(this.aiBuffer, "utf8") > MAX_AI_LINE_BYTES) {
+            this.emitSessionError("ai_message_too_large", "AI socket sent an oversized JSON line.");
+            this.emitSessionState("error", "AI socket protocol error.");
+            this.close();
+            return;
+        }
         let newlineIndex = this.aiBuffer.indexOf("\n");
         while (newlineIndex >= 0) {
             const line = this.aiBuffer.slice(0, newlineIndex).trim();
@@ -463,6 +475,14 @@ function browserPayloadToUtf8(payload) {
         return payload.toString("utf8");
     }
     return Buffer.from(payload).toString("utf8");
+}
+function constantTimeEqual(left, right) {
+    const leftBuffer = Buffer.from(left);
+    const rightBuffer = Buffer.from(right);
+    if (leftBuffer.length !== rightBuffer.length) {
+        return false;
+    }
+    return timingSafeEqual(leftBuffer, rightBuffer);
 }
 async function closeHttpServer(server) {
     await new Promise((resolve) => server.close(() => resolve()));

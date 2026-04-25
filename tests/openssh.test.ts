@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { ensureKeyPair, fingerprintPublicKey, signPayload, SSH_SIGNING_NAMESPACE } from "../src/openssh.js";
+import { ensureKeyPair, fingerprintPublicKey, openSshTunnel, signPayload, SSH_SIGNING_NAMESPACE, trustHost } from "../src/openssh.js";
 
 test("ensureKeyPair creates an ed25519 key pair and leaves existing keys intact", () => {
   const tempDir = mkdtempSync(join(tmpdir(), "incarnate-openssh-"));
@@ -71,4 +71,10 @@ test("signPayload creates a verifiable SSH signature in the Incarnate namespace"
   } finally {
     rmSync(tempDir, { recursive: true, force: true });
   }
+});
+
+test("SSH helpers reject option-like hosts and invalid ports before spawning ssh", async () => {
+  await assert.rejects(() => trustHost("-oProxyCommand=sh"), /Invalid SSH host alias/);
+  await assert.rejects(() => openSshTunnel("game.inc-realm.com", 0), /Invalid remote port/);
+  await assert.rejects(() => openSshTunnel("bad host", 8083), /Invalid SSH host alias/);
 });

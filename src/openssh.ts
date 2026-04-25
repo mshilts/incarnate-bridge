@@ -63,6 +63,7 @@ export function signPayload(keyPath: string, payload: string) {
 }
 
 export async function trustHost(sshHost: string) {
+  validateSshDestination(sshHost);
   const result = spawnSync("ssh", ["-o", "StrictHostKeyChecking=accept-new", "-o", "BatchMode=yes", "-T", sshHost, "exit"], {
     encoding: "utf8"
   });
@@ -111,6 +112,8 @@ async function waitForPort(host: string, port: number, timeoutMs: number) {
 }
 
 export async function openSshTunnel(sshHost: string, remotePort: number) {
+  validateSshDestination(sshHost);
+  validateTcpPort(remotePort, "remote port");
   const localPort = await reserveLocalPort();
   const process = spawn("ssh", [
     "-o",
@@ -151,4 +154,17 @@ export async function openSshTunnel(sshHost: string, remotePort: number) {
       }
     }
   };
+}
+
+function validateSshDestination(sshHost: string) {
+  const value = sshHost.trim();
+  if (!value || value.startsWith("-") || /[\u0000-\u001f\u007f\s]/.test(value)) {
+    throw new Error("Invalid SSH host alias.");
+  }
+}
+
+function validateTcpPort(port: number, label: string) {
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`Invalid ${label}.`);
+  }
 }

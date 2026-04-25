@@ -41,6 +41,63 @@ test("browser bridge rejects bad token and wrong origin before opening a session
   }
 });
 
+test("browser bridge refuses to start without a session token", async () => {
+  const key = createTestKey();
+  const mockAi = await startMockAiServer();
+  try {
+    await assert.rejects(
+      () => startBrowserBridgeServer({
+        aiHost: "127.0.0.1",
+        aiPort: mockAi.port,
+        wsHost: "127.0.0.1",
+        wsPort: 0,
+        account: "matt",
+        keyLabel: "device",
+        keyPath: key.path,
+        character: "Matthew_mage",
+        radius: 6,
+        sessionToken: "",
+        allowedOrigin: ORIGIN
+      }),
+      /session token/
+    );
+  } finally {
+    await mockAi.close();
+    key.close();
+  }
+});
+
+test("oversized AI JSON lines close the browser session", async () => {
+  const key = createTestKey();
+  const mockAi = await startMockAiServer({ sendOversizedLineAfterHello: true });
+  const bridge = await startBrowserBridgeServer({
+    aiHost: "127.0.0.1",
+    aiPort: mockAi.port,
+    wsHost: "127.0.0.1",
+    wsPort: 0,
+    account: "",
+    keyLabel: "device",
+    keyPath: key.path,
+    character: "",
+    radius: 6,
+    sessionToken: TOKEN,
+    allowedOrigin: ORIGIN
+  });
+
+  try {
+    const client = await connectBrowser(bridge.port);
+    await waitForError(client.packets, "ai_message_too_large");
+    await waitFor(
+      () => client.ws.readyState === WebSocket.CLOSING || client.ws.readyState === WebSocket.CLOSED,
+      "browser socket should close after oversized AI JSON"
+    );
+  } finally {
+    await bridge.close();
+    await mockAi.close();
+    key.close();
+  }
+});
+
 test("authenticated browser bridge signs auth, auto-selects the character, and relays allowed commands", async () => {
   const key = createTestKey();
   const mockAi = await startMockAiServer();
@@ -253,7 +310,7 @@ interface MockAiServer {
   close: () => Promise<void>;
 }
 
-async function startMockAiServer(options: { sendInvalidJsonAfterHello?: boolean } = {}): Promise<MockAiServer> {
+async function startMockAiServer(options: { sendInvalidJsonAfterHello?: boolean; sendOversizedLineAfterHello?: boolean } = {}): Promise<MockAiServer> {
   const received: Array<Record<string, unknown>> = [];
   const sockets = new Set<net.Socket>();
   const server = net.createServer((socket) => {
@@ -264,6 +321,9 @@ async function startMockAiServer(options: { sendInvalidJsonAfterHello?: boolean 
     send(socket, { schemaVersion: 1, type: "ping", token: "unit-ping" });
     if (options.sendInvalidJsonAfterHello) {
       setTimeout(() => socket.write("{invalid-json\n"), 20);
+    }
+    if (options.sendOversizedLineAfterHello) {
+      setTimeout(() => socket.write("x".repeat(1024 * 1024 + 1)), 20);
     }
     socket.on("data", (chunk) => {
       buffer += String(chunk);

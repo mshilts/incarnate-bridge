@@ -5,8 +5,8 @@ import { fingerprintPublicKey, KEY_ONLY_SENTINEL } from "./openssh.js";
 export function ensureLocalAccountKey(repoRoot: string, account: string, keyLabel: string, publicKey: string) {
   validateLocalIdentifier("account", account);
   validateLocalIdentifier("key label", keyLabel);
-  if (/[\r\n]/.test(publicKey)) {
-    throw new Error("Public key must be a single line.");
+  if (/[\u0000-\u001f\u007f]/.test(publicKey)) {
+    throw new Error("Public key must not contain control characters.");
   }
   const accountPath = path.join(repoRoot, "java", "lib_server", "accounts", `${account}.act`);
   const fingerprint = fingerprintPublicKey(publicKey);

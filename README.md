@@ -1,4 +1,4 @@
-# @incarnate/bridge
+# @inc-realm/bridge
 
 Open-source local bridge and SSH transport control plane for Incarnate.
 
@@ -27,11 +27,16 @@ installer or starting the bridge.
 
 ## Install
 
-After the package is published:
+Install the published CLI:
 
 ```bash
-npm install -g @incarnate/bridge
+npm install -g @inc-realm/bridge
 ```
+
+The package has no `preinstall`, `install`, or `postinstall` scripts. Installing
+it downloads the package, installs its single runtime dependency (`ws`), and
+links the `incarnate-bridge` executable. Local keys, SSH host trust, tunnels, and
+WebSocket listeners are created only when you run the CLI commands below.
 
 During source review or local development:
 
@@ -41,6 +46,39 @@ cd incarnate-bridge
 npm install
 npm run build
 ```
+
+## Local Security Boundaries
+
+This package is intentionally small because it crosses local trust boundaries.
+For review purposes, its local effects are:
+
+- Files: `key generate` creates an Ed25519 private key at
+  `~/.ssh/incarnate_ed25519` by default, plus the matching `.pub` file. You can
+  override this with `--key-path` or `INCARNATE_KEY_PATH`.
+- Local dev files: `browser start --bootstrap-local-dev` may create or update
+  `<repo-root>/java/lib_server/accounts/<account>.act` for local server testing.
+  This path is not touched unless that flag or `INCARNATE_BOOTSTRAP_LOCAL_DEV`
+  is used.
+- SSH host trust: `host trust` runs OpenSSH with
+  `StrictHostKeyChecking=accept-new`, which may add the selected host key to the
+  user's normal OpenSSH `known_hosts` store.
+- Processes: the package spawns only `ssh-keygen` and `ssh`, using argument
+  arrays rather than a shell. SSH host aliases that look like command-line
+  options or contain whitespace/control characters are rejected before spawning.
+- Network: `browser start` listens on loopback by default
+  (`127.0.0.1:8787`) and connects either to a loopback AI socket
+  (`127.0.0.1:8083`) or to that socket through an OpenSSH local port forward.
+- Browser bridge access: the WebSocket bridge requires a random session token,
+  rejects configured wrong browser origins, caps browser frame/message sizes, and
+  blocks browser-originated account/key-management commands after bridge-owned
+  authentication.
+- Secrets: private keys are never sent to the server. The bridge sends public
+  keys and detached `ssh-keygen -Y sign` signatures over server-provided
+  challenge payloads in the `incarnate-auth` namespace.
+
+The package does not run a background daemon, install launch agents, modify shell
+startup files, read browser storage, collect environment variables wholesale, or
+depend on the private Incarnate monorepo at runtime.
 
 ## Primary Commands
 
@@ -98,6 +136,7 @@ server refuses to deactivate the last active key for an account.
 - accepts only the launcher session token
 - rejects unexpected browser origins when configured
 - rejects malformed and oversized browser messages without forwarding them
+- closes sessions on malformed or oversized upstream AI socket messages
 - blocks browser-originated account/key-management commands after bridge-owned auth
 - authenticates upstream with the same SSH-key challenge flow
 - auto-selects a configured character when one was provided
@@ -131,11 +170,13 @@ For public hosted play, set `INCARNATE_TRANSPORT=ssh` and pass or export
 ## Verification
 
 ```bash
+npm audit --omit=dev
 npm run build
+npm test
 npm run browser:security-test
 npm run pack:check
 ```
 
-The package is configured for public npm publishing with provenance from GitHub
-Actions. The npm package contains `dist/`, `src/`, `README.md`, and `LICENSE` so
-users can review the shipped JavaScript and the TypeScript source.
+The npm package contains `dist/`, `src/`, `tests/`, `README.md`, and `LICENSE`
+so users can review the shipped JavaScript, TypeScript source, and regression
+tests. `npm run pack:check` shows the exact files that would be published.

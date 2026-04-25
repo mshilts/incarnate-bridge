@@ -1,6 +1,6 @@
 {
-  "name": "@incarnate/bridge",
-  "version": "0.1.0",
+  "name": "@inc-realm/bridge",
+  "version": "0.1.1",
   "description": "Open-source local bridge and SSH transport control plane for Incarnate",
   "type": "module",
   "license": "MIT",
@@ -13,7 +13,7 @@
     "url": "https://github.com/mshilts/incarnate-bridge/issues"
   },
   "bin": {
-    "incarnate-bridge": "./dist/cli.js"
+    "incarnate-bridge": "dist/cli.js"
   },
   "files": [
     "dist/",
@@ -26,7 +26,7 @@
     "access": "public"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && chmod +x dist/cli.js",
     "test": "npm run build && npm run test:unit && npm run browser:security-test",
     "test:unit": "node --import tsx --test tests/*.test.ts",
     "prepack": "npm run build",

@@ -47,7 +47,8 @@ test("ensureLocalAccountKey rejects path traversal and line injection inputs", (
   try {
     assert.throws(() => ensureLocalAccountKey(tempDir, "../matt", "device", "ssh-ed25519 AAAA"), /Invalid account/);
     assert.throws(() => ensureLocalAccountKey(tempDir, "matt", "device\nadmin", "ssh-ed25519 AAAA"), /Invalid key label/);
-    assert.throws(() => ensureLocalAccountKey(tempDir, "matt", "device", "ssh-ed25519 AAAA\nextra"), /single line/);
+    assert.throws(() => ensureLocalAccountKey(tempDir, "matt", "device", "ssh-ed25519 AAAA\nextra"), /control characters/);
+    assert.throws(() => ensureLocalAccountKey(tempDir, "matt", "device", "ssh-ed25519\tAAAA"), /control characters/);
   } finally {
     rmSync(tempDir, { recursive: true, force: true });
   }
