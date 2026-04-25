@@ -1,0 +1,56 @@
+{
+  "name": "@incarnate/bridge",
+  "version": "0.1.0",
+  "description": "Open-source local bridge and SSH transport control plane for Incarnate",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/mshilts/incarnate-bridge.git"
+  },
+  "homepage": "https://github.com/mshilts/incarnate-bridge#readme",
+  "bugs": {
+    "url": "https://github.com/mshilts/incarnate-bridge/issues"
+  },
+  "bin": {
+    "incarnate-bridge": "./dist/cli.js"
+  },
+  "files": [
+    "dist/",
+    "tests/",
+    "src/",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && npm run test:unit && npm run browser:security-test",
+    "test:unit": "node --import tsx --test tests/*.test.ts",
+    "prepack": "npm run build",
+    "pack:check": "npm pack --dry-run",
+    "browser:security-test": "tsx src/browser-server-security-regression.ts",
+    "browser:start": "tsx src/cli.ts browser start",
+    "key:generate": "tsx src/cli.ts key generate",
+    "key:inspect": "tsx src/cli.ts key inspect",
+    "host:trust": "tsx src/cli.ts host trust",
+    "account:create": "tsx src/cli.ts account create",
+    "account:add-key": "tsx src/cli.ts account add-key",
+    "account:list-keys": "tsx src/cli.ts account list-keys",
+    "account:remove-key": "tsx src/cli.ts account remove-key"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.6.0",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
+  }
+}
