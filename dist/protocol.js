@@ -11,6 +11,7 @@ export const BROWSER_AI_COMMAND_TYPES = [
     "account_keys",
     "attributes",
     "auth_begin",
+    "auth_key_probe",
     "account_view",
     "auction_send",
     "buy",

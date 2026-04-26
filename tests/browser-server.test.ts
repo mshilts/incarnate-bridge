@@ -173,6 +173,7 @@ test("browser bridge blocks malformed, oversized, unsupported, and browser-manag
     assert.equal(mockAi.received.length, beforeUnsupported, "unsupported commands must not reach the server");
 
     for (const command of [
+      { type: "auth_key_probe", keyLabel: "device" },
       { type: "auth_begin", account: "matt", keyLabel: "device" },
       { type: "account_create_begin", account: "evil", keyLabel: "device" },
       { type: "account_add_key_begin", keyLabel: "second-device" }
@@ -217,6 +218,11 @@ test("account setup session permits account creation and injects local public ke
   try {
     const client = await connectBrowser(bridge.port);
     await waitFor(() => client.packets.some((packet) => packet.type === "session_state" && packet.state === "ready"), "setup session should become ready");
+    await waitFor(() => mockAi.received.some((packet) => packet.type === "auth_key_probe"), "accountless session should probe local device key");
+    const probe = mockAi.received.find((packet) => packet.type === "auth_key_probe");
+    assert.equal(probe?.keyLabel, "device");
+    assert.equal(probe?.publicKey, publicKey);
+    assert(client.packets.some((packet) => packet.type === "auth_key_probe_result" && packet.status === "unknown"));
 
     client.ws.send(JSON.stringify({ type: "account_create_begin", account: "newplayer" }));
     await waitFor(() => mockAi.received.some((packet) => packet.type === "account_create_begin"), "account create should relay during setup");
@@ -227,6 +233,40 @@ test("account setup session permits account creation and injects local public ke
 
     client.ws.send(JSON.stringify({ type: "account_add_key_begin", keyLabel: "second" }));
     await waitForError(client.packets, "account_command_forbidden");
+
+    client.ws.close();
+    await once(client.ws, "close");
+  } finally {
+    await bridge.close();
+    await mockAi.close();
+    key.close();
+  }
+});
+
+test("accountless browser bridge signs recognized key probe challenges", async () => {
+  const key = createTestKey();
+  const mockAi = await startMockAiServer({ recognizeProbe: true });
+  const bridge = await startBrowserBridgeServer({
+    aiHost: "127.0.0.1",
+    aiPort: mockAi.port,
+    wsHost: "127.0.0.1",
+    wsPort: 0,
+    account: "",
+    keyLabel: "device",
+    keyPath: key.path,
+    character: "",
+    radius: 6,
+    sessionToken: TOKEN,
+    allowedOrigin: ORIGIN
+  });
+
+  try {
+    const client = await connectBrowser(bridge.port);
+    await waitFor(() => client.packets.some((packet) => packet.type === "character_list"), "recognized probe should authenticate");
+
+    assert(mockAi.received.some((packet) => packet.type === "auth_key_probe"));
+    assert(mockAi.received.some((packet) => packet.type === "auth_complete" && String(packet.signature).includes("BEGIN SSH SIGNATURE")));
+    assert(client.packets.some((packet) => packet.type === "auth_key_probe_result" && packet.status === "recognized"));
 
     client.ws.close();
     await once(client.ws, "close");
@@ -310,7 +350,11 @@ interface MockAiServer {
   close: () => Promise<void>;
 }
 
-async function startMockAiServer(options: { sendInvalidJsonAfterHello?: boolean; sendOversizedLineAfterHello?: boolean } = {}): Promise<MockAiServer> {
+async function startMockAiServer(options: {
+  recognizeProbe?: boolean;
+  sendInvalidJsonAfterHello?: boolean;
+  sendOversizedLineAfterHello?: boolean;
+} = {}): Promise<MockAiServer> {
   const received: Array<Record<string, unknown>> = [];
   const sockets = new Set<net.Socket>();
   const server = net.createServer((socket) => {
@@ -334,7 +378,7 @@ async function startMockAiServer(options: { sendInvalidJsonAfterHello?: boolean;
         if (line) {
           const packet = JSON.parse(line) as Record<string, unknown>;
           received.push(packet);
-          handleAiCommand(socket, packet);
+          handleAiCommand(socket, packet, options);
         }
         newline = buffer.indexOf("\n");
       }
@@ -356,7 +400,22 @@ async function startMockAiServer(options: { sendInvalidJsonAfterHello?: boolean;
   };
 }
 
-function handleAiCommand(socket: net.Socket, packet: Record<string, unknown>) {
+function handleAiCommand(socket: net.Socket, packet: Record<string, unknown>, options: { recognizeProbe?: boolean } = {}) {
+  if (packet.type === "auth_key_probe") {
+    send(socket, {
+      schemaVersion: 1,
+      type: "auth_key_probe_result",
+      status: options.recognizeProbe ? "recognized" : "unknown",
+      account: options.recognizeProbe ? "matt" : "",
+      keyLabel: "device",
+      fingerprint: String(packet.fingerprint ?? ""),
+      message: options.recognizeProbe ? "Signing in." : "This device is not registered yet."
+    });
+    if (options.recognizeProbe) {
+      send(socket, { schemaVersion: 1, type: "auth_challenge", signingPayload: "auth_key_probe:unit-challenge" });
+    }
+    return;
+  }
   if (packet.type === "auth_begin" || packet.type === "account_create_begin") {
     send(socket, { schemaVersion: 1, type: "auth_challenge", signingPayload: `${packet.type}:unit-challenge` });
     return;

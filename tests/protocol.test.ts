@@ -16,6 +16,7 @@ test("browser command allowlist is unique and includes sensitive server-authoriz
     "paid_buy",
     "paid_unlock",
     "auth_begin",
+    "auth_key_probe",
     "account_create_begin",
     "account_add_key_begin"
   ]) {

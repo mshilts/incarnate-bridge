@@ -106,7 +106,8 @@ npm run browser:start -- --transport ssh --ssh-host game.inc-realm.com --account
 
 ## Auth Model
 
-The live login flow is challenge-based and key-only:
+The live login flow is challenge-based and key-only. A configured account still
+uses explicit account auth:
 
 1. connect to the Java AI socket through `local-direct` loopback or an SSH tunnel
 2. send `auth_begin` with `account` and `keyLabel`
@@ -116,8 +117,19 @@ The live login flow is challenge-based and key-only:
 6. receive `auth_result`
 7. receive `character_list` and then choose a character
 
+Browser first-run mode can start with `--account ""`. In that mode the bridge
+sends `auth_key_probe` with its public key and fingerprint after server `hello`.
+If the key is already registered, the server issues the normal challenge for the
+owning account and the bridge signs it locally. If the key is unknown, the
+browser shows account setup and may send `account_create_begin` or explicit
+`auth_begin` for an existing account.
+
 Account creation uses the same challenge-signing path through
 `account_create_begin` and `account_create_complete`.
+
+Every active public key is globally unique to one account. The server rejects
+account creation and key-add attempts that reuse an active key from another
+account. Removing a key deactivates it instead of erasing the record.
 
 Key rotation uses the account command surface:
 
@@ -138,6 +150,7 @@ server refuses to deactivate the last active key for an account.
 - rejects malformed and oversized browser messages without forwarding them
 - closes sessions on malformed or oversized upstream AI socket messages
 - blocks browser-originated account/key-management commands after bridge-owned auth
+- probes the local public key during accountless browser onboarding
 - authenticates upstream with the same SSH-key challenge flow
 - auto-selects a configured character when one was provided
 - replies to AI heartbeat `ping` packets with local `pong`

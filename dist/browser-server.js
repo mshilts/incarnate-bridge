@@ -6,6 +6,7 @@ import { BROWSER_AI_COMMAND_TYPES } from "./protocol.js";
 import { fingerprintPublicKey, readPublicKey, signPayload } from "./openssh.js";
 const ALLOWED_COMMANDS = new Set(BROWSER_AI_COMMAND_TYPES);
 const BROWSER_MANAGED_ACCOUNT_COMMANDS = new Set([
+    "auth_key_probe",
     "auth_begin",
     "account_create_begin",
     "account_add_key_begin"
@@ -254,7 +255,9 @@ class BridgeSession {
             }
             else {
                 this.forward(packet);
-                this.emitSessionState("ready", "Browser bridge ready for account setup.");
+                this.emitSessionState("authenticating", "Checking this device key.");
+                this.pendingChallengeKind = "auth";
+                this.sendKeyProbe();
             }
             return;
         }
@@ -271,6 +274,18 @@ class BridgeSession {
             }
             catch (error) {
                 this.emitSessionError("auth_sign_failed", String(error));
+            }
+            return;
+        }
+        if (type === "auth_key_probe_result") {
+            this.forward(packet);
+            const status = String(packet.status ?? "");
+            if (status === "unknown" || status === "error" || status === "duplicate") {
+                this.pendingChallengeKind = "";
+                this.emitSessionState("ready", "Browser bridge ready for account setup.");
+            }
+            else if (status === "recognized") {
+                this.emitSessionState("authenticating", "Signing in with this device key.");
             }
             return;
         }
@@ -339,7 +354,11 @@ class BridgeSession {
     prepareBrowserCommand(command) {
         if (command.type === "auth_begin") {
             this.pendingChallengeKind = "auth";
-            return command;
+            const packet = command;
+            if (!String(packet.keyLabel ?? "").trim()) {
+                packet.keyLabel = this.options.keyLabel;
+            }
+            return packet;
         }
         if (command.type === "account_create_begin") {
             this.pendingChallengeKind = "account_create";
@@ -369,7 +388,7 @@ class BridgeSession {
         if (!BROWSER_MANAGED_ACCOUNT_COMMANDS.has(commandType)) {
             return false;
         }
-        if (commandType === "account_add_key_begin") {
+        if (commandType === "auth_key_probe" || commandType === "account_add_key_begin") {
             return true;
         }
         return this.authenticated || this.options.account.trim().length > 0;
@@ -395,6 +414,22 @@ class BridgeSession {
         }
         catch (error) {
             this.emitSessionError("device_key_failed", String(error));
+        }
+    }
+    sendKeyProbe() {
+        try {
+            const publicKey = readPublicKey(this.options.keyPath);
+            this.writeRawAiCommand({
+                schemaVersion: 1,
+                type: "auth_key_probe",
+                keyLabel: this.options.keyLabel,
+                publicKey,
+                fingerprint: fingerprintPublicKey(publicKey)
+            });
+        }
+        catch (error) {
+            this.emitSessionError("device_key_failed", String(error));
+            this.emitSessionState("error", "Unable to read local device key.");
         }
     }
     autoSelectConfiguredCharacter() {

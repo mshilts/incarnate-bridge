@@ -69,6 +69,7 @@ async function verifyAuthenticatedBridgeControls(port, mockAi) {
     ws.send(JSON.stringify({ type: "guild_command", action: "god_observe", target: "CLK" }));
     await waitFor(() => mockAi.received.some((packet) => packet.type === "guild_command"), "guild commands should relay to server authorization");
     await assertBlockedFromAi(ws, packets, mockAi, { type: "auth_begin", account: "matt", keyLabel: "security-regression" });
+    await assertBlockedFromAi(ws, packets, mockAi, { type: "auth_key_probe", keyLabel: "security-regression" });
     await assertBlockedFromAi(ws, packets, mockAi, { type: "account_create_begin", account: "evil", keyLabel: "security-regression" });
     await assertBlockedFromAi(ws, packets, mockAi, { type: "account_add_key_begin", keyLabel: "evil-device" });
     for (const command of [
