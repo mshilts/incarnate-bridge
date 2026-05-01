@@ -72,8 +72,11 @@ async function verifyAuthenticatedBridgeControls(port, mockAi) {
     await waitFor(() => mockAi.received.some((packet) => packet.type === "ops_dashboard_request"), "SysOps dashboard request should relay to server authorization");
     await assertBlockedFromAi(ws, packets, mockAi, { type: "auth_begin", account: "matt", keyLabel: "security-regression" });
     await assertBlockedFromAi(ws, packets, mockAi, { type: "auth_key_probe", keyLabel: "security-regression" });
+    await assertBlockedFromAi(ws, packets, mockAi, { type: "auth_complete", signature: "attacker-controlled" });
     await assertBlockedFromAi(ws, packets, mockAi, { type: "account_create_begin", account: "evil", keyLabel: "security-regression" });
+    await assertBlockedFromAi(ws, packets, mockAi, { type: "account_create_complete", signature: "attacker-controlled" });
     await assertBlockedFromAi(ws, packets, mockAi, { type: "account_add_key_begin", keyLabel: "evil-device" });
+    await assertBlockedFromAi(ws, packets, mockAi, { type: "account_add_key_complete", signature: "attacker-controlled" });
     for (const command of [
         { type: "credits" },
         { type: "buy_credits", credits: 100 },

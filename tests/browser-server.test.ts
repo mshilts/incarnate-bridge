@@ -139,7 +139,221 @@ test("authenticated browser bridge signs auth, auto-selects the character, and r
   }
 });
 
-test("browser bridge blocks malformed, oversized, unsupported, and browser-managed account commands", async () => {
+test("browser bridge forwards open-ended game commands to AI socket", async () => {
+  const key = createTestKey();
+  const mockAi = await startMockAiServer();
+  const bridge = await startBrowserBridgeServer({
+    aiHost: "127.0.0.1",
+    aiPort: mockAi.port,
+    wsHost: "127.0.0.1",
+    wsPort: 0,
+    account: "matt",
+    keyLabel: "device",
+    keyPath: key.path,
+    character: "Matthew_mage",
+    radius: 6,
+    sessionToken: TOKEN,
+    allowedOrigin: ORIGIN
+  });
+
+  try {
+    const client = await connectBrowser(bridge.port);
+    await waitFor(() => client.packets.some((packet) => packet.type === "session_ready"), "session should become ready");
+
+    client.ws.send(JSON.stringify({ type: "shell", command: "server-authorized-command" }));
+    client.ws.send(JSON.stringify({ type: "future_server_command", payload: { ok: true } }));
+    await waitFor(() => mockAi.received.some((packet) => packet.type === "shell"), "unknown game command should relay");
+    await waitFor(() => mockAi.received.some((packet) => packet.type === "future_server_command"), "future server command should relay");
+
+    client.ws.close();
+    await once(client.ws, "close");
+  } finally {
+    await bridge.close();
+    await mockAi.close();
+    key.close();
+  }
+});
+
+test("browser bridge forwards new server commands without bridge catalog updates", async () => {
+  const key = createTestKey();
+  const mockAi = await startMockAiServer();
+  const bridge = await startBrowserBridgeServer({
+    aiHost: "127.0.0.1",
+    aiPort: mockAi.port,
+    wsHost: "127.0.0.1",
+    wsPort: 0,
+    account: "matt",
+    keyLabel: "device",
+    keyPath: key.path,
+    character: "Matthew_mage",
+    radius: 6,
+    sessionToken: TOKEN,
+    allowedOrigin: ORIGIN
+  });
+
+  try {
+    const client = await connectBrowser(bridge.port);
+    await waitFor(() => client.packets.some((packet) => packet.type === "session_ready"), "session should become ready");
+
+    client.ws.send(JSON.stringify({ type: "ops_dashboard_request" }));
+    await waitFor(() => mockAi.received.some((packet) => packet.type === "ops_dashboard_request"), "SysOps dashboard command should relay");
+
+    client.ws.close();
+    await once(client.ws, "close");
+  } finally {
+    await bridge.close();
+    await mockAi.close();
+    key.close();
+  }
+});
+
+test("browser bridge rejects missing command type", async () => {
+  const key = createTestKey();
+  const mockAi = await startMockAiServer();
+  const bridge = await startBrowserBridgeServer({
+    aiHost: "127.0.0.1",
+    aiPort: mockAi.port,
+    wsHost: "127.0.0.1",
+    wsPort: 0,
+    account: "matt",
+    keyLabel: "device",
+    keyPath: key.path,
+    character: "Matthew_mage",
+    radius: 6,
+    sessionToken: TOKEN,
+    allowedOrigin: ORIGIN
+  });
+
+  try {
+    const client = await connectBrowser(bridge.port);
+    await waitFor(() => client.packets.some((packet) => packet.type === "session_ready"), "session should become ready");
+    const before = mockAi.received.length;
+
+    client.ws.send(JSON.stringify({ direction: "east" }));
+    await waitForError(client.packets, "invalid_browser_command");
+    await delay(50);
+    assert.equal(mockAi.received.length, before, "missing command type must not reach the server");
+
+    client.ws.close();
+    await once(client.ws, "close");
+  } finally {
+    await bridge.close();
+    await mockAi.close();
+    key.close();
+  }
+});
+
+test("browser bridge rejects empty command type", async () => {
+  const key = createTestKey();
+  const mockAi = await startMockAiServer();
+  const bridge = await startBrowserBridgeServer({
+    aiHost: "127.0.0.1",
+    aiPort: mockAi.port,
+    wsHost: "127.0.0.1",
+    wsPort: 0,
+    account: "matt",
+    keyLabel: "device",
+    keyPath: key.path,
+    character: "Matthew_mage",
+    radius: 6,
+    sessionToken: TOKEN,
+    allowedOrigin: ORIGIN
+  });
+
+  try {
+    const client = await connectBrowser(bridge.port);
+    await waitFor(() => client.packets.some((packet) => packet.type === "session_ready"), "session should become ready");
+    const before = mockAi.received.length;
+
+    client.ws.send(JSON.stringify({ type: "" }));
+    client.ws.send(JSON.stringify({ type: "   " }));
+    await waitForError(client.packets, "invalid_browser_command");
+    await delay(50);
+    assert.equal(mockAi.received.length, before, "empty command types must not reach the server");
+
+    client.ws.close();
+    await once(client.ws, "close");
+  } finally {
+    await bridge.close();
+    await mockAi.close();
+    key.close();
+  }
+});
+
+test("browser bridge rejects non-string command type", async () => {
+  const key = createTestKey();
+  const mockAi = await startMockAiServer();
+  const bridge = await startBrowserBridgeServer({
+    aiHost: "127.0.0.1",
+    aiPort: mockAi.port,
+    wsHost: "127.0.0.1",
+    wsPort: 0,
+    account: "matt",
+    keyLabel: "device",
+    keyPath: key.path,
+    character: "Matthew_mage",
+    radius: 6,
+    sessionToken: TOKEN,
+    allowedOrigin: ORIGIN
+  });
+
+  try {
+    const client = await connectBrowser(bridge.port);
+    await waitFor(() => client.packets.some((packet) => packet.type === "session_ready"), "session should become ready");
+    const before = mockAi.received.length;
+
+    client.ws.send(JSON.stringify({ type: 42 }));
+    await waitForError(client.packets, "invalid_browser_command");
+    await delay(50);
+    assert.equal(mockAi.received.length, before, "non-string command type must not reach the server");
+
+    client.ws.close();
+    await once(client.ws, "close");
+  } finally {
+    await bridge.close();
+    await mockAi.close();
+    key.close();
+  }
+});
+
+test("browser bridge keeps reserved local messages off the AI socket", async () => {
+  const key = createTestKey();
+  const mockAi = await startMockAiServer();
+  const bridge = await startBrowserBridgeServer({
+    aiHost: "127.0.0.1",
+    aiPort: mockAi.port,
+    wsHost: "127.0.0.1",
+    wsPort: 0,
+    account: "matt",
+    keyLabel: "device",
+    keyPath: key.path,
+    character: "Matthew_mage",
+    radius: 6,
+    sessionToken: TOKEN,
+    allowedOrigin: ORIGIN
+  });
+
+  try {
+    const client = await connectBrowser(bridge.port);
+    await waitFor(() => client.packets.some((packet) => packet.type === "session_ready"), "session should become ready");
+    const before = mockAi.received.length;
+
+    client.ws.send(JSON.stringify({ type: "client_debug", source: "test", event: "click" }));
+    client.ws.send(JSON.stringify({ type: "bridge_device_key" }));
+    await waitFor(() => client.packets.some((packet) => packet.type === "bridge_device_key"), "device key should be answered locally");
+    await delay(50);
+    assert.equal(mockAi.received.length, before, "reserved local messages must not reach the server");
+
+    client.ws.close();
+    await once(client.ws, "close");
+  } finally {
+    await bridge.close();
+    await mockAi.close();
+    key.close();
+  }
+});
+
+test("browser bridge blocks malformed, oversized, and browser-managed account commands", async () => {
   const key = createTestKey();
   const mockAi = await startMockAiServer();
   const bridge = await startBrowserBridgeServer({
@@ -166,17 +380,14 @@ test("browser bridge blocks malformed, oversized, unsupported, and browser-manag
     client.ws.send("x".repeat(70_000));
     await waitForError(client.packets, "browser_message_too_large");
 
-    const beforeUnsupported = mockAi.received.length;
-    client.ws.send(JSON.stringify({ type: "shell", command: "id" }));
-    await waitForError(client.packets, "unsupported_command");
-    await delay(50);
-    assert.equal(mockAi.received.length, beforeUnsupported, "unsupported commands must not reach the server");
-
     for (const command of [
       { type: "auth_key_probe", keyLabel: "device" },
       { type: "auth_begin", account: "matt", keyLabel: "device" },
+      { type: "auth_complete", signature: "attacker-controlled" },
       { type: "account_create_begin", account: "evil", keyLabel: "device" },
-      { type: "account_add_key_begin", keyLabel: "second-device" }
+      { type: "account_create_complete", signature: "attacker-controlled" },
+      { type: "account_add_key_begin", keyLabel: "second-device" },
+      { type: "account_add_key_complete", signature: "attacker-controlled" }
     ]) {
       const before = mockAi.received.length;
       client.ws.send(JSON.stringify(command));

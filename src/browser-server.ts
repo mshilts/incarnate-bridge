@@ -3,7 +3,11 @@ import { timingSafeEqual } from "node:crypto";
 import net from "node:net";
 import type { AddressInfo } from "node:net";
 import { WebSocketServer, type WebSocket } from "ws";
-import { BROWSER_AI_COMMAND_TYPES, type BrowserAiCommandContract, type BrowserSessionState } from "./protocol.js";
+import {
+  BRIDGE_RESERVED_BROWSER_MESSAGE_TYPES,
+  type BrowserAiCommandContract,
+  type BrowserSessionState
+} from "./protocol.js";
 import { fingerprintPublicKey, readPublicKey, signPayload } from "./openssh.js";
 
 export interface BrowserBridgeOptions {
@@ -25,14 +29,17 @@ export interface BrowserBridgeServer {
   port: number;
 }
 
-const ALLOWED_COMMANDS = new Set<string>(BROWSER_AI_COMMAND_TYPES);
-
 const BROWSER_MANAGED_ACCOUNT_COMMANDS = new Set([
   "auth_key_probe",
   "auth_begin",
+  "auth_complete",
   "account_create_begin",
-  "account_add_key_begin"
+  "account_create_complete",
+  "account_add_key_begin",
+  "account_add_key_complete"
 ]);
+
+const BRIDGE_RESERVED_MESSAGES = new Set<string>(BRIDGE_RESERVED_BROWSER_MESSAGE_TYPES);
 
 const MAX_BROWSER_MESSAGE_BYTES = 64 * 1024;
 const MAX_WEBSOCKET_FRAME_BYTES = 1024 * 1024;
@@ -188,19 +195,28 @@ class BridgeSession {
       this.emitSessionError("invalid_browser_json", "Browser bridge received malformed JSON.");
       return;
     }
-    if (parsed.type === "client_debug") {
+    const type = browserCommandType(parsed);
+    if (type === "client_debug") {
       this.log(`client_debug ${String(parsed.source ?? "browser")}:${String(parsed.event ?? "event")} ${truncateDebugDetail(parsed.detail)}`);
       return;
     }
-    if (parsed.type === "bridge_device_key") {
+    if (type === "bridge_device_key") {
       this.forwardDeviceKey();
       return;
     }
-    const command = parsed as unknown as BrowserAiCommandContract;
-    if (!ALLOWED_COMMANDS.has(command.type)) {
-      this.emitSessionError("unsupported_command", `Command ${String(command.type)} is not allowed by the browser bridge.`);
+    if (!type) {
+      this.emitSessionError("invalid_browser_command", "Browser bridge command type must be a non-empty string.");
       return;
     }
+    if (hasControlCharacters(type) || type !== type.trim()) {
+      this.emitSessionError("invalid_browser_command", "Browser bridge command type must not contain whitespace or control characters.");
+      return;
+    }
+    if (BRIDGE_RESERVED_MESSAGES.has(type)) {
+      this.emitSessionError("reserved_browser_command", `Command ${type} is reserved by the browser bridge.`);
+      return;
+    }
+    const command = { ...parsed, type } as BrowserAiCommandContract;
     if (this.rejectBrowserManagedAccountCommand(command.type)) {
       this.emitSessionError("account_command_forbidden", `Command ${String(command.type)} is not allowed from this browser bridge session.`);
       return;
@@ -531,6 +547,14 @@ class BridgeSession {
 
 function normalizeName(value: string) {
   return String(value ?? "").trim().toLowerCase();
+}
+
+function browserCommandType(parsed: Record<string, unknown>) {
+  return typeof parsed.type === "string" ? parsed.type : "";
+}
+
+function hasControlCharacters(value: string) {
+  return /[\u0000-\u001f\u007f]/.test(value);
 }
 
 function truncateDebugDetail(detail: unknown) {

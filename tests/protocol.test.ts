@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { BROWSER_AI_COMMAND_TYPES } from "../src/protocol.js";
+import { BRIDGE_RESERVED_BROWSER_MESSAGE_TYPES, type BrowserAiCommandContract } from "../src/protocol.js";
 
-test("browser command allowlist is unique and includes sensitive server-authorized commands", () => {
-  const commands = new Set(BROWSER_AI_COMMAND_TYPES);
-  assert.equal(commands.size, BROWSER_AI_COMMAND_TYPES.length, "command allowlist should not contain duplicates");
+test("bridge exposes only reserved local browser messages, not a game command catalog", () => {
+  const reserved = new Set<string>(BRIDGE_RESERVED_BROWSER_MESSAGE_TYPES);
+  assert.equal(reserved.size, BRIDGE_RESERVED_BROWSER_MESSAGE_TYPES.length, "reserved local browser messages should not contain duplicates");
+  assert.deepEqual([...reserved].sort(), ["bridge_device_key", "client_debug"]);
 
   for (const command of [
     "guild_command",
@@ -21,8 +22,18 @@ test("browser command allowlist is unique and includes sensitive server-authoriz
     "account_create_begin",
     "account_add_key_begin"
   ]) {
-    assert(commands.has(command as typeof BROWSER_AI_COMMAND_TYPES[number]), `${command} should be represented in the bridge contract`);
+    assert.equal(reserved.has(command), false, `${command} should not be modeled as a bridge-local message`);
   }
+});
+
+test("browser command contract accepts open-ended game command types", () => {
+  const command: BrowserAiCommandContract = {
+    schemaVersion: 1,
+    type: "future_server_command",
+    payload: { ok: true }
+  };
+
+  assert.equal(command.type, "future_server_command");
 });
 
 test("package has no private monorepo runtime dependency", () => {

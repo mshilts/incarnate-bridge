@@ -149,15 +149,20 @@ server refuses to deactivate the last active key for an account.
 - rejects unexpected browser origins when configured
 - rejects malformed and oversized browser messages without forwarding them
 - closes sessions on malformed or oversized upstream AI socket messages
-- blocks browser-originated account/key-management commands after bridge-owned auth
+- blocks browser-originated account/key-management begin and completion messages
+  that must be owned by local key signing
 - probes the local public key during accountless browser onboarding
 - authenticates upstream with the same SSH-key challenge flow
+- forwards open-ended game commands to the AI socket and leaves command
+  semantics, SysOp/god/payment checks, and gameplay authorization to the server
 - auto-selects a configured character when one was provided
 - replies to AI heartbeat `ping` packets with local `pong`
 
-The bridge intentionally uses minimal local protocol types in `src/protocol.ts`.
-It forwards server packets as JSON and does not need the private game repo's full
-browser UI contract.
+The bridge intentionally uses minimal local protocol types in `src/protocol.ts`
+and does not maintain the game command catalog. It reserves only bridge-local
+browser messages such as `client_debug` and `bridge_device_key`, forwards normal
+browser command envelopes as JSON, and does not need the private game repo's
+full browser UI contract.
 
 AI agent clients are intentionally outside this package. They can depend on this
 package for key handling, SSH tunneling, and browser bridge protocol helpers
