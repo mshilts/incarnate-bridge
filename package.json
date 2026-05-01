@@ -1,6 +1,6 @@
 {
   "name": "@inc-realm/bridge",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Open-source local bridge and SSH transport control plane for Incarnate",
   "type": "module",
   "license": "MIT",

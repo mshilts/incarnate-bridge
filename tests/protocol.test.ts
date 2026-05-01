@@ -11,6 +11,7 @@ test("browser command allowlist is unique and includes sensitive server-authoriz
     "guild_command",
     "god_mode",
     "god_map_save",
+    "ops_dashboard_request",
     "payments_command",
     "buy_credits",
     "paid_buy",

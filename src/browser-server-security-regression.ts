@@ -85,6 +85,8 @@ async function verifyAuthenticatedBridgeControls(port: number, mockAi: MockAiSer
   await waitFor(() => mockAi.received.some((packet) => packet.type === "move"), "valid command should still relay after rejected frames");
   ws.send(JSON.stringify({ type: "guild_command", action: "god_observe", target: "CLK" }));
   await waitFor(() => mockAi.received.some((packet) => packet.type === "guild_command"), "guild commands should relay to server authorization");
+  ws.send(JSON.stringify({ type: "ops_dashboard_request" }));
+  await waitFor(() => mockAi.received.some((packet) => packet.type === "ops_dashboard_request"), "SysOps dashboard request should relay to server authorization");
 
   await assertBlockedFromAi(ws, packets, mockAi, { type: "auth_begin", account: "matt", keyLabel: "security-regression" });
   await assertBlockedFromAi(ws, packets, mockAi, { type: "auth_key_probe", keyLabel: "security-regression" });

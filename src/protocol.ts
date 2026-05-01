@@ -79,6 +79,7 @@ export const BROWSER_AI_COMMAND_TYPES = [
   "move_to",
   "movement_mode",
   "open_close",
+  "ops_dashboard_request",
   "path_to",
   "paid_buy",
   "paid_shop",
