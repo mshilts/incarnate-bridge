@@ -2,9 +2,16 @@ import { createServer } from "node:http";
 import { timingSafeEqual } from "node:crypto";
 import net from "node:net";
 import { WebSocketServer } from "ws";
-import { BROWSER_AI_COMMAND_TYPES } from "./protocol.js";
+import { BROWSER_RESERVED_COMMAND_TYPES, isBrowserAiCommandType } from "./protocol.js";
 import { fingerprintPublicKey, readPublicKey, signPayload } from "./openssh.js";
-const ALLOWED_COMMANDS = new Set(BROWSER_AI_COMMAND_TYPES);
+const RESERVED_BROWSER_COMMANDS = new Set(BROWSER_RESERVED_COMMAND_TYPES);
+const RESERVED_BROWSER_COMMAND_PREFIXES = [
+    "bridge_",
+    "host_",
+    "key_",
+    "local_",
+    "ssh_"
+];
 const BROWSER_MANAGED_ACCOUNT_COMMANDS = new Set([
     "auth_key_probe",
     "auth_begin",
@@ -165,13 +172,17 @@ class BridgeSession {
             this.forwardDeviceKey();
             return;
         }
-        const command = parsed;
-        if (!ALLOWED_COMMANDS.has(command.type)) {
-            this.emitSessionError("unsupported_command", `Command ${String(command.type)} is not allowed by the browser bridge.`);
+        if (!isBrowserAiCommandType(parsed.type)) {
+            this.emitSessionError("unsupported_command", `Command ${String(parsed.type)} is not accepted by the browser bridge.`);
             return;
         }
+        const command = parsed;
         if (this.rejectBrowserManagedAccountCommand(command.type)) {
             this.emitSessionError("account_command_forbidden", `Command ${String(command.type)} is not allowed from this browser bridge session.`);
+            return;
+        }
+        if (this.rejectReservedBrowserCommand(command.type)) {
+            this.emitSessionError("bridge_command_forbidden", `Command ${String(command.type)} is reserved for the browser bridge.`);
             return;
         }
         if (command.type === "tell_send") {
@@ -392,6 +403,12 @@ class BridgeSession {
             return true;
         }
         return this.authenticated || this.options.account.trim().length > 0;
+    }
+    rejectReservedBrowserCommand(commandType) {
+        if (RESERVED_BROWSER_COMMANDS.has(commandType)) {
+            return true;
+        }
+        return RESERVED_BROWSER_COMMAND_PREFIXES.some((prefix) => commandType.startsWith(prefix));
     }
     challengeResponseType() {
         if (this.pendingChallengeKind === "account_create") {

@@ -70,8 +70,9 @@ For review purposes, its local effects are:
   (`127.0.0.1:8083`) or to that socket through an OpenSSH local port forward.
 - Browser bridge access: the WebSocket bridge requires a random session token,
   rejects configured wrong browser origins, caps browser frame/message sizes, and
-  blocks browser-originated account/key-management commands after bridge-owned
-  authentication.
+  blocks bridge-owned local-control commands. Gameplay and operator commands are
+  forwarded to the server after syntax validation so the game server remains the
+  authorization authority.
 - Secrets: private keys are never sent to the server. The bridge sends public
   keys and detached `ssh-keygen -Y sign` signatures over server-provided
   challenge payloads in the `incarnate-auth` namespace.
@@ -150,6 +151,10 @@ server refuses to deactivate the last active key for an account.
 - rejects malformed and oversized browser messages without forwarding them
 - closes sessions on malformed or oversized upstream AI socket messages
 - blocks browser-originated account/key-management commands after bridge-owned auth
+- blocks bridge-owned local-control command responses and `bridge_`, `ssh_`,
+  `host_`, `key_`, and `local_` command namespaces
+- forwards syntactically valid gameplay/operator command types without a bridge
+  allowlist so new server commands do not require bridge releases
 - probes the local public key during accountless browser onboarding
 - authenticates upstream with the same SSH-key challenge flow
 - auto-selects a configured character when one was provided

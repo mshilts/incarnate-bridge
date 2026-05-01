@@ -98,7 +98,7 @@ test("oversized AI JSON lines close the browser session", async () => {
   }
 });
 
-test("authenticated browser bridge signs auth, auto-selects the character, and relays allowed commands", async () => {
+test("authenticated browser bridge signs auth, auto-selects the character, and relays browser commands", async () => {
   const key = createTestKey();
   const mockAi = await startMockAiServer();
   const bridge = await startBrowserBridgeServer({
@@ -127,8 +127,10 @@ test("authenticated browser bridge signs auth, auto-selects the character, and r
 
     client.ws.send(JSON.stringify({ type: "move", direction: "east", count: 1 }));
     client.ws.send(JSON.stringify({ type: "payments_command", action: "status" }));
+    client.ws.send(JSON.stringify({ type: "future_gameplay_probe", payload: "server-owned" }));
     await waitFor(() => mockAi.received.some((packet) => packet.type === "move"), "move should relay");
     await waitFor(() => mockAi.received.some((packet) => packet.type === "payments_command"), "payment commands should relay to server authorization");
+    await waitFor(() => mockAi.received.some((packet) => packet.type === "future_gameplay_probe"), "future gameplay commands should relay to server authorization");
 
     client.ws.close();
     await once(client.ws, "close");
@@ -139,7 +141,7 @@ test("authenticated browser bridge signs auth, auto-selects the character, and r
   }
 });
 
-test("browser bridge blocks malformed, oversized, unsupported, and browser-managed account commands", async () => {
+test("browser bridge blocks malformed, oversized, invalid, and browser-managed account commands", async () => {
   const key = createTestKey();
   const mockAi = await startMockAiServer();
   const bridge = await startBrowserBridgeServer({
@@ -166,11 +168,11 @@ test("browser bridge blocks malformed, oversized, unsupported, and browser-manag
     client.ws.send("x".repeat(70_000));
     await waitForError(client.packets, "browser_message_too_large");
 
-    const beforeUnsupported = mockAi.received.length;
-    client.ws.send(JSON.stringify({ type: "shell", command: "id" }));
+    const beforeInvalid = mockAi.received.length;
+    client.ws.send(JSON.stringify({ type: "shell.exec", command: "id" }));
     await waitForError(client.packets, "unsupported_command");
     await delay(50);
-    assert.equal(mockAi.received.length, beforeUnsupported, "unsupported commands must not reach the server");
+    assert.equal(mockAi.received.length, beforeInvalid, "invalid command types must not reach the server");
 
     for (const command of [
       { type: "auth_key_probe", keyLabel: "device" },
@@ -184,6 +186,22 @@ test("browser bridge blocks malformed, oversized, unsupported, and browser-manag
       await delay(50);
       assert.equal(mockAi.received.slice(before).some((packet) => packet.type === command.type), false, `${command.type} must not leak upstream`);
     }
+
+    for (const command of [
+      { type: "auth_complete", signature: "forged" },
+      { type: "client_capabilities", viewportDeltas: false },
+      { type: "ssh_tunnel_open", host: "attacker.invalid" },
+      { type: "key_export", keyLabel: "device" }
+    ]) {
+      const before = mockAi.received.length;
+      client.ws.send(JSON.stringify(command));
+      await waitForError(client.packets, "bridge_command_forbidden");
+      await delay(50);
+      assert.equal(mockAi.received.slice(before).some((packet) => packet.type === command.type), false, `${command.type} must not leak upstream`);
+    }
+
+    client.ws.send(JSON.stringify({ type: "shell", command: "id" }));
+    await waitFor(() => mockAi.received.some((packet) => packet.type === "shell"), "syntactically valid future server commands should relay");
 
     client.ws.send(JSON.stringify({ type: "look_tile", x: 1, y: 1 }));
     await waitFor(() => mockAi.received.some((packet) => packet.type === "look_tile"), "session should keep working after rejected frames");

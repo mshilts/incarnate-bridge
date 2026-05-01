@@ -70,10 +70,14 @@ async function verifyAuthenticatedBridgeControls(port, mockAi) {
     await waitFor(() => mockAi.received.some((packet) => packet.type === "guild_command"), "guild commands should relay to server authorization");
     ws.send(JSON.stringify({ type: "ops_dashboard_request" }));
     await waitFor(() => mockAi.received.some((packet) => packet.type === "ops_dashboard_request"), "SysOps dashboard request should relay to server authorization");
+    ws.send(JSON.stringify({ type: "future_gameplay_probe", payload: "server-owned" }));
+    await waitFor(() => mockAi.received.some((packet) => packet.type === "future_gameplay_probe"), "future gameplay commands should relay to server authorization");
     await assertBlockedFromAi(ws, packets, mockAi, { type: "auth_begin", account: "matt", keyLabel: "security-regression" });
     await assertBlockedFromAi(ws, packets, mockAi, { type: "auth_key_probe", keyLabel: "security-regression" });
     await assertBlockedFromAi(ws, packets, mockAi, { type: "account_create_begin", account: "evil", keyLabel: "security-regression" });
     await assertBlockedFromAi(ws, packets, mockAi, { type: "account_add_key_begin", keyLabel: "evil-device" });
+    await assertBlockedFromAi(ws, packets, mockAi, { type: "auth_complete", signature: "forged" }, "bridge_command_forbidden");
+    await assertBlockedFromAi(ws, packets, mockAi, { type: "ssh_tunnel_open", host: "attacker.invalid" }, "bridge_command_forbidden");
     for (const command of [
         { type: "credits" },
         { type: "buy_credits", credits: 100 },
@@ -88,11 +92,11 @@ async function verifyAuthenticatedBridgeControls(port, mockAi) {
     ws.close();
     await once(ws, "close");
 }
-async function assertBlockedFromAi(ws, packets, mockAi, command) {
+async function assertBlockedFromAi(ws, packets, mockAi, command, errorCode = "account_command_forbidden") {
     const before = mockAi.received.length;
-    const errorCountBefore = packets.filter((packet) => packet.type === "session_error" && packet.code === "account_command_forbidden").length;
+    const errorCountBefore = packets.filter((packet) => packet.type === "session_error" && packet.code === errorCode).length;
     ws.send(JSON.stringify(command));
-    await waitFor(() => packets.filter((packet) => packet.type === "session_error" && packet.code === "account_command_forbidden").length > errorCountBefore, `${command.type} should be rejected by the bridge`);
+    await waitFor(() => packets.filter((packet) => packet.type === "session_error" && packet.code === errorCode).length > errorCountBefore, `${command.type} should be rejected by the bridge`);
     await delay(40);
     const leaked = mockAi.received.slice(before).filter((packet) => packet.type === command.type);
     assert.equal(leaked.length, 0, `${command.type} should not reach the AI socket from an authenticated browser`);

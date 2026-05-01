@@ -1,27 +1,45 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { BROWSER_AI_COMMAND_TYPES } from "../src/protocol.js";
+import {
+  BROWSER_RESERVED_COMMAND_TYPES,
+  isBrowserAiCommandType
+} from "../src/protocol.js";
 
-test("browser command allowlist is unique and includes sensitive server-authorized commands", () => {
-  const commands = new Set(BROWSER_AI_COMMAND_TYPES);
-  assert.equal(commands.size, BROWSER_AI_COMMAND_TYPES.length, "command allowlist should not contain duplicates");
+test("browser bridge reserves only local-control command responses", () => {
+  const commands = new Set(BROWSER_RESERVED_COMMAND_TYPES);
+  assert.equal(commands.size, BROWSER_RESERVED_COMMAND_TYPES.length, "reserved command list should not contain duplicates");
 
   for (const command of [
-    "guild_command",
-    "god_mode",
-    "god_map_save",
-    "ops_dashboard_request",
-    "payments_command",
-    "buy_credits",
-    "paid_buy",
-    "paid_unlock",
-    "auth_begin",
-    "auth_key_probe",
-    "account_create_begin",
-    "account_add_key_begin"
+    "auth_complete",
+    "account_create_complete",
+    "account_add_key_complete",
+    "client_capabilities",
+    "pong"
   ]) {
-    assert(commands.has(command as typeof BROWSER_AI_COMMAND_TYPES[number]), `${command} should be represented in the bridge contract`);
+    assert(commands.has(command as typeof BROWSER_RESERVED_COMMAND_TYPES[number]), `${command} should be reserved for bridge control`);
+  }
+});
+
+test("browser command type syntax accepts future gameplay commands without a bridge allowlist", () => {
+  for (const command of [
+    "move",
+    "ops_dashboard_request",
+    "future_gameplay_probe",
+    "paid_buy"
+  ]) {
+    assert.equal(isBrowserAiCommandType(command), true, `${command} should be accepted as a browser command type`);
+  }
+
+  for (const command of [
+    "",
+    "_hidden",
+    "BridgeCommand",
+    "shell.exec",
+    "x".repeat(65),
+    undefined
+  ]) {
+    assert.equal(isBrowserAiCommandType(command), false, `${String(command)} should not be accepted as a browser command type`);
   }
 });
 

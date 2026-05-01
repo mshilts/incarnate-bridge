@@ -3,7 +3,12 @@ import { timingSafeEqual } from "node:crypto";
 import net from "node:net";
 import type { AddressInfo } from "node:net";
 import { WebSocketServer, type WebSocket } from "ws";
-import { BROWSER_AI_COMMAND_TYPES, type BrowserAiCommandContract, type BrowserSessionState } from "./protocol.js";
+import {
+  BROWSER_RESERVED_COMMAND_TYPES,
+  isBrowserAiCommandType,
+  type BrowserAiCommandContract,
+  type BrowserSessionState
+} from "./protocol.js";
 import { fingerprintPublicKey, readPublicKey, signPayload } from "./openssh.js";
 
 export interface BrowserBridgeOptions {
@@ -25,7 +30,14 @@ export interface BrowserBridgeServer {
   port: number;
 }
 
-const ALLOWED_COMMANDS = new Set<string>(BROWSER_AI_COMMAND_TYPES);
+const RESERVED_BROWSER_COMMANDS = new Set<string>(BROWSER_RESERVED_COMMAND_TYPES);
+const RESERVED_BROWSER_COMMAND_PREFIXES = [
+  "bridge_",
+  "host_",
+  "key_",
+  "local_",
+  "ssh_"
+];
 
 const BROWSER_MANAGED_ACCOUNT_COMMANDS = new Set([
   "auth_key_probe",
@@ -196,13 +208,17 @@ class BridgeSession {
       this.forwardDeviceKey();
       return;
     }
-    const command = parsed as unknown as BrowserAiCommandContract;
-    if (!ALLOWED_COMMANDS.has(command.type)) {
-      this.emitSessionError("unsupported_command", `Command ${String(command.type)} is not allowed by the browser bridge.`);
+    if (!isBrowserAiCommandType(parsed.type)) {
+      this.emitSessionError("unsupported_command", `Command ${String(parsed.type)} is not accepted by the browser bridge.`);
       return;
     }
+    const command = parsed as BrowserAiCommandContract;
     if (this.rejectBrowserManagedAccountCommand(command.type)) {
       this.emitSessionError("account_command_forbidden", `Command ${String(command.type)} is not allowed from this browser bridge session.`);
+      return;
+    }
+    if (this.rejectReservedBrowserCommand(command.type)) {
+      this.emitSessionError("bridge_command_forbidden", `Command ${String(command.type)} is reserved for the browser bridge.`);
       return;
     }
     if (command.type === "tell_send") {
@@ -421,6 +437,13 @@ class BridgeSession {
       return true;
     }
     return this.authenticated || this.options.account.trim().length > 0;
+  }
+
+  private rejectReservedBrowserCommand(commandType: string) {
+    if (RESERVED_BROWSER_COMMANDS.has(commandType)) {
+      return true;
+    }
+    return RESERVED_BROWSER_COMMAND_PREFIXES.some((prefix) => commandType.startsWith(prefix));
   }
 
   private challengeResponseType() {
