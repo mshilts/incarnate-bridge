@@ -5,8 +5,8 @@ import os from "node:os";
 import path from "node:path";
 export const SSH_SIGNING_NAMESPACE = "incarnate-auth";
 export const KEY_ONLY_SENTINEL = "KEY_ONLY";
-export function defaultKeyPath() {
-    return path.join(os.homedir(), ".ssh", "incarnate_ed25519");
+export function defaultKeyPath(fileName = "incarnate_ed25519") {
+    return path.join(os.homedir(), ".ssh", fileName);
 }
 export function ensureKeyPair(keyPath, comment = "incarnate") {
     if (fs.existsSync(keyPath) && fs.existsSync(`${keyPath}.pub`)) {
@@ -40,12 +40,12 @@ export function fingerprintPublicKey(publicKey) {
         fs.rmSync(tempDirectory, { recursive: true, force: true });
     }
 }
-export function signPayload(keyPath, payload) {
+export function signPayload(keyPath, payload, namespace = SSH_SIGNING_NAMESPACE) {
     const tempDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "incarnate-sign-"));
     const payloadPath = path.join(tempDirectory, "payload.txt");
     try {
         fs.writeFileSync(payloadPath, payload, "utf8");
-        const result = spawnSync("ssh-keygen", ["-Y", "sign", "-f", keyPath, "-n", SSH_SIGNING_NAMESPACE, payloadPath], {
+        const result = spawnSync("ssh-keygen", ["-Y", "sign", "-f", keyPath, "-n", namespace, payloadPath], {
             encoding: "utf8"
         });
         if (result.status !== 0) {

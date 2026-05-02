@@ -8,6 +8,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { WebSocket } from "ws";
 import { startBrowserBridgeServer } from "../src/browser-server.js";
+import { defineBridgeGameConfig } from "../src/config.js";
 import { ensureKeyPair } from "../src/openssh.js";
 
 const TOKEN = "unit-test-token";
@@ -197,6 +198,63 @@ test("browser bridge forwards new server commands without bridge catalog updates
 
     client.ws.send(JSON.stringify({ type: "ops_dashboard_request" }));
     await waitFor(() => mockAi.received.some((packet) => packet.type === "ops_dashboard_request"), "SysOps dashboard command should relay");
+
+    client.ws.close();
+    await once(client.ws, "close");
+  } finally {
+    await bridge.close();
+    await mockAi.close();
+    key.close();
+  }
+});
+
+test("browser bridge can run with a non-Incarnate protocol config", async () => {
+  const gameConfig = defineBridgeGameConfig({
+    gameId: "test-game",
+    displayName: "Test Game",
+    signingNamespace: "test-game-auth",
+    protocol: {
+      clientCapabilities: "client_features",
+      authBegin: "login_begin",
+      authChallenge: "login_challenge",
+      authComplete: "login_complete",
+      authResult: "login_result",
+      authChallengePayloadField: "payload",
+      characterList: ["hero_list"],
+      characterSelected: "hero_selected",
+      characterSelect: "hero_select",
+      queryViewport: "viewport_query"
+    }
+  });
+  const key = createTestKey();
+  const mockAi = await startCustomProtocolAiServer();
+  const bridge = await startBrowserBridgeServer({
+    gameConfig,
+    aiHost: "127.0.0.1",
+    aiPort: mockAi.port,
+    wsHost: "127.0.0.1",
+    wsPort: 0,
+    account: "player",
+    keyLabel: "device",
+    keyPath: key.path,
+    character: "Ada",
+    radius: 5,
+    sessionToken: TOKEN,
+    allowedOrigin: ORIGIN
+  });
+
+  try {
+    const client = await connectBrowser(bridge.port);
+    await waitFor(() => client.packets.some((packet) => packet.type === "session_ready"), "custom protocol session should become ready");
+
+    assert(mockAi.received.some((packet) => packet.type === "client_features"));
+    assert(mockAi.received.some((packet) => packet.type === "login_begin" && packet.account === "player"));
+    assert(mockAi.received.some((packet) => packet.type === "login_complete" && String(packet.signature).includes("BEGIN SSH SIGNATURE")));
+    assert(mockAi.received.some((packet) => packet.type === "hero_select" && packet.character === "Ada"));
+    assert(mockAi.received.some((packet) => packet.type === "viewport_query"));
+
+    client.ws.send(JSON.stringify({ type: "new_game_command" }));
+    await waitFor(() => mockAi.received.some((packet) => packet.type === "new_game_command"), "custom protocol command should relay");
 
     client.ws.close();
     await once(client.ws, "close");
@@ -658,6 +716,52 @@ function handleAiCommand(socket: net.Socket, packet: Record<string, unknown>, op
 
 function send(socket: net.Socket, packet: Record<string, unknown>) {
   socket.write(`${JSON.stringify(packet)}\n`);
+}
+
+async function startCustomProtocolAiServer(): Promise<MockAiServer> {
+  const received: Array<Record<string, unknown>> = [];
+  const sockets = new Set<net.Socket>();
+  const server = net.createServer((socket) => {
+    sockets.add(socket);
+    socket.setEncoding("utf8");
+    let buffer = "";
+    send(socket, { schemaVersion: 1, type: "hello" });
+    socket.on("data", (chunk) => {
+      buffer += String(chunk);
+      let newline = buffer.indexOf("\n");
+      while (newline >= 0) {
+        const line = buffer.slice(0, newline).trim();
+        buffer = buffer.slice(newline + 1);
+        if (line) {
+          const packet = JSON.parse(line) as Record<string, unknown>;
+          received.push(packet);
+          if (packet.type === "login_begin") {
+            send(socket, { schemaVersion: 1, type: "login_challenge", payload: "custom-protocol-challenge" });
+          } else if (packet.type === "login_complete") {
+            send(socket, { schemaVersion: 1, type: "login_result", ok: true, account: "player" });
+            send(socket, { schemaVersion: 1, type: "hero_list", characters: [{ name: "Ada" }] });
+          } else if (packet.type === "hero_select") {
+            send(socket, { schemaVersion: 1, type: "hero_selected", character: String(packet.character ?? "Ada"), mapName: "Test Map" });
+          }
+        }
+        newline = buffer.indexOf("\n");
+      }
+    });
+    socket.on("close", () => sockets.delete(socket));
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+  const address = server.address() as AddressInfo;
+  return {
+    port: address.port,
+    received,
+    close: async () => {
+      for (const socket of sockets) {
+        socket.destroy();
+      }
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  };
 }
 
 async function waitFor(predicate: () => boolean, message: string) {

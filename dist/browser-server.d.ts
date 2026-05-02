@@ -1,4 +1,6 @@
+import { type BridgeGameConfig } from "./config.js";
 export interface BrowserBridgeOptions {
+    gameConfig?: BridgeGameConfig;
     aiHost: string;
     aiPort: number;
     wsHost: string;

@@ -2,17 +2,9 @@ import { createServer } from "node:http";
 import { timingSafeEqual } from "node:crypto";
 import net from "node:net";
 import { WebSocketServer } from "ws";
-import { BRIDGE_RESERVED_BROWSER_MESSAGE_TYPES } from "./protocol.js";
+import { BRIDGE_RESERVED_BROWSER_MESSAGE_TYPES } from "./config.js";
+import { INCARNATE_GAME_CONFIG } from "./incarnate.js";
 import { fingerprintPublicKey, readPublicKey, signPayload } from "./openssh.js";
-const BROWSER_MANAGED_ACCOUNT_COMMANDS = new Set([
-    "auth_key_probe",
-    "auth_begin",
-    "auth_complete",
-    "account_create_begin",
-    "account_create_complete",
-    "account_add_key_begin",
-    "account_add_key_complete"
-]);
 const BRIDGE_RESERVED_MESSAGES = new Set(BRIDGE_RESERVED_BROWSER_MESSAGE_TYPES);
 const MAX_BROWSER_MESSAGE_BYTES = 64 * 1024;
 const MAX_WEBSOCKET_FRAME_BYTES = 1024 * 1024;
@@ -23,6 +15,7 @@ export async function startBrowserBridgeServer(options) {
     }
     const httpServer = createServer();
     const wsServer = new WebSocketServer({ server: httpServer, maxPayload: MAX_WEBSOCKET_FRAME_BYTES });
+    const gameConfig = options.gameConfig ?? INCARNATE_GAME_CONFIG;
     let session = null;
     wsServer.on("connection", (socket, request) => {
         const token = new URL(request.url ?? "/", `http://${options.wsHost}:${options.wsPort}`).searchParams.get("token") ?? "";
@@ -36,7 +29,7 @@ export async function startBrowserBridgeServer(options) {
             return;
         }
         if (!session || session.isClosed()) {
-            session = new BridgeSession(options, () => {
+            session = new BridgeSession(options, gameConfig, () => {
                 session = null;
             });
             session.start();
@@ -67,6 +60,7 @@ export async function startBrowserBridgeServer(options) {
 }
 class BridgeSession {
     options;
+    gameConfig;
     onClosed;
     socket = null;
     aiSocket = null;
@@ -82,8 +76,9 @@ class BridgeSession {
     lastLifecyclePacket = null;
     pendingChallengeKind = "";
     authenticated = false;
-    constructor(options, onClosed) {
+    constructor(options, gameConfig, onClosed) {
         this.options = options;
+        this.gameConfig = gameConfig;
         this.onClosed = onClosed;
     }
     start() {
@@ -177,7 +172,7 @@ class BridgeSession {
             this.emitSessionError("invalid_browser_command", "Browser bridge command type must not contain whitespace or control characters.");
             return;
         }
-        if (BRIDGE_RESERVED_MESSAGES.has(type)) {
+        if (BRIDGE_RESERVED_MESSAGES.has(type) || this.gameConfig.reservedBrowserMessageTypes.includes(type)) {
             this.emitSessionError("reserved_browser_command", `Command ${type} is reserved by the browser bridge.`);
             return;
         }
@@ -225,10 +220,11 @@ class BridgeSession {
     }
     onAiPacket(packet) {
         const type = String(packet.type ?? "");
-        if (type === "ping") {
+        const protocol = this.gameConfig.protocol;
+        if (type === protocol.ping) {
             this.writeRawAiCommand({
                 schemaVersion: 1,
-                type: "pong",
+                type: protocol.pong,
                 token: String(packet.token ?? "")
             });
             return;
@@ -247,11 +243,11 @@ class BridgeSession {
                 packet.to = this.options.character;
             }
         }
-        if (type === "hello") {
-            this.emitSessionState("connected", "Received Incarnate session hello.");
+        if (type === protocol.hello) {
+            this.emitSessionState("connected", `Received ${this.gameConfig.displayName} session hello.`);
             this.writeRawAiCommand({
                 schemaVersion: 1,
-                type: "client_capabilities",
+                type: protocol.clientCapabilities,
                 viewportDeltas: true
             });
             this.forwardDeviceKey();
@@ -260,7 +256,7 @@ class BridgeSession {
                 this.pendingChallengeKind = "auth";
                 this.writeRawAiCommand({
                     schemaVersion: 1,
-                    type: "auth_begin",
+                    type: protocol.authBegin,
                     account: this.options.account,
                     keyLabel: this.options.keyLabel
                 });
@@ -273,9 +269,10 @@ class BridgeSession {
             }
             return;
         }
-        if (type === "auth_challenge") {
+        if (type === protocol.authChallenge) {
             try {
-                const signature = signPayload(this.options.keyPath, String(packet.signingPayload ?? ""));
+                const signingPayload = String(packet[protocol.authChallengePayloadField] ?? "");
+                const signature = signPayload(this.options.keyPath, signingPayload, this.gameConfig.signingNamespace);
                 const responseType = this.challengeResponseType();
                 this.writeRawAiCommand({
                     schemaVersion: 1,
@@ -289,20 +286,20 @@ class BridgeSession {
             }
             return;
         }
-        if (type === "auth_key_probe_result") {
+        if (type === protocol.keyProbeResult) {
             this.forward(packet);
             const status = String(packet.status ?? "");
-            if (status === "unknown" || status === "error" || status === "duplicate") {
+            if (protocol.keyProbeSetupStatuses.includes(status)) {
                 this.pendingChallengeKind = "";
                 this.emitSessionState("ready", "Browser bridge ready for account setup.");
             }
-            else if (status === "recognized") {
+            else if (status === protocol.keyProbeRecognizedStatus) {
                 this.emitSessionState("authenticating", "Signing in with this device key.");
             }
             return;
         }
-        if (type === "auth_result") {
-            const ok = packet.ok === true || packet.accepted === true;
+        if (type === protocol.authResult) {
+            const ok = protocol.authResultAcceptedFields.some((field) => packet[field] === true);
             this.authenticated = ok;
             if (!ok) {
                 this.emitSessionError("auth_failed", String(packet.message ?? "Authentication failed."));
@@ -310,7 +307,7 @@ class BridgeSession {
             this.forward(packet);
             return;
         }
-        if (type === "character_list") {
+        if (protocol.characterList.includes(type)) {
             this.lastLifecyclePacket = packet;
             this.forward(packet);
             if (this.autoSelectConfiguredCharacter()) {
@@ -321,37 +318,26 @@ class BridgeSession {
             }
             return;
         }
-        if (type === "character_roster") {
-            this.lastLifecyclePacket = packet;
-            this.forward(packet);
-            if (this.autoSelectConfiguredCharacter()) {
-                this.selectConfiguredCharacter();
-            }
-            else {
-                this.emitSessionState("ready", "Character roster available.");
-            }
-            return;
-        }
-        if (type === "character_builder_state") {
+        if (type === protocol.characterBuilderState) {
             this.lastLifecyclePacket = packet;
             this.forward(packet);
             this.emitSessionState("ready", "Character builder available.");
             return;
         }
-        if (type === "character_selected") {
+        if (type === protocol.characterSelected) {
             this.autoSelectPending = false;
             this.activeCharacter = String(packet.character ?? this.options.character);
             this.activeMapName = String(packet.mapName ?? "");
             this.forward(packet);
             const readyPacket = {
-                type: "session_ready",
+                type: protocol.sessionReady,
                 character: this.activeCharacter,
                 mapName: this.activeMapName
             };
             this.lastLifecyclePacket = readyPacket;
             this.forward(readyPacket);
             this.emitSessionState("ready", "Browser session ready.");
-            this.sendAiCommand({ type: "query_viewport" });
+            this.sendAiCommand({ type: protocol.queryViewport });
             return;
         }
         if (type === "action_result") {
@@ -364,7 +350,8 @@ class BridgeSession {
         this.writeRawAiCommand(packet);
     }
     prepareBrowserCommand(command) {
-        if (command.type === "auth_begin") {
+        const protocol = this.gameConfig.protocol;
+        if (command.type === protocol.authBegin) {
             this.pendingChallengeKind = "auth";
             const packet = command;
             if (!String(packet.keyLabel ?? "").trim()) {
@@ -372,7 +359,7 @@ class BridgeSession {
             }
             return packet;
         }
-        if (command.type === "account_create_begin") {
+        if (command.type === protocol.accountCreateBegin) {
             this.pendingChallengeKind = "account_create";
             const packet = command;
             if (!String(packet.publicKey ?? "").trim()) {
@@ -383,7 +370,7 @@ class BridgeSession {
             }
             return packet;
         }
-        if (command.type === "account_add_key_begin") {
+        if (command.type === protocol.accountAddKeyBegin) {
             this.pendingChallengeKind = "account_add_key";
             const packet = command;
             if (!String(packet.publicKey ?? "").trim()) {
@@ -397,22 +384,28 @@ class BridgeSession {
         return command;
     }
     rejectBrowserManagedAccountCommand(commandType) {
-        if (!BROWSER_MANAGED_ACCOUNT_COMMANDS.has(commandType)) {
+        if (!this.gameConfig.bridgeManagedBrowserCommandTypes.includes(commandType)) {
             return false;
         }
-        if (commandType === "auth_key_probe" || commandType === "account_add_key_begin") {
+        const protocol = this.gameConfig.protocol;
+        if (commandType === protocol.keyProbe ||
+            commandType === protocol.authComplete ||
+            commandType === protocol.accountCreateComplete ||
+            commandType === protocol.accountAddKeyBegin ||
+            commandType === protocol.accountAddKeyComplete) {
             return true;
         }
         return this.authenticated || this.options.account.trim().length > 0;
     }
     challengeResponseType() {
+        const protocol = this.gameConfig.protocol;
         if (this.pendingChallengeKind === "account_create") {
-            return "account_create_complete";
+            return protocol.accountCreateComplete;
         }
         if (this.pendingChallengeKind === "account_add_key") {
-            return "account_add_key_complete";
+            return protocol.accountAddKeyComplete;
         }
-        return "auth_complete";
+        return protocol.authComplete;
     }
     forwardDeviceKey() {
         try {
@@ -433,7 +426,7 @@ class BridgeSession {
             const publicKey = readPublicKey(this.options.keyPath);
             this.writeRawAiCommand({
                 schemaVersion: 1,
-                type: "auth_key_probe",
+                type: this.gameConfig.protocol.keyProbe,
                 keyLabel: this.options.keyLabel,
                 publicKey,
                 fingerprint: fingerprintPublicKey(publicKey)
@@ -451,7 +444,7 @@ class BridgeSession {
         this.autoSelectPending = false;
         this.writeRawAiCommand({
             schemaVersion: 1,
-            type: "character_select",
+            type: this.gameConfig.protocol.characterSelect,
             character: this.options.character,
             radius: this.options.radius
         });
@@ -493,8 +486,8 @@ class BridgeSession {
             this.forward(this.lastLifecyclePacket);
         }
         if (this.sessionState === "ready" && this.activeCharacter.length > 0) {
-            this.sendAiCommand({ type: "status" });
-            this.sendAiCommand({ type: "query_viewport" });
+            this.sendAiCommand({ type: this.gameConfig.protocol.status });
+            this.sendAiCommand({ type: this.gameConfig.protocol.queryViewport });
         }
     }
     log(message) {

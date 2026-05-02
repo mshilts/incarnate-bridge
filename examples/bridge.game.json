@@ -1,0 +1,24 @@
+{
+  "gameId": "example-realm",
+  "displayName": "Example Realm",
+  "signingNamespace": "example-realm-auth",
+  "defaultKeyPath": "~/.ssh/example_realm_ed25519",
+  "defaultKeyLabel": "device",
+  "defaultAccount": "",
+  "defaultAiHost": "127.0.0.1",
+  "defaultAiPort": 8083,
+  "defaultBrowserBridgeHost": "127.0.0.1",
+  "defaultBrowserBridgePort": 8787,
+  "defaultBrowserOriginPort": 4174,
+  "defaultSshHost": "game.example.invalid",
+  "protocol": {
+    "hello": "hello",
+    "authBegin": "auth_begin",
+    "authChallenge": "auth_challenge",
+    "authComplete": "auth_complete",
+    "authResult": "auth_result",
+    "authChallengePayloadField": "signingPayload",
+    "keyProbe": "auth_key_probe",
+    "keyProbeResult": "auth_key_probe_result"
+  }
+}

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { BRIDGE_RESERVED_BROWSER_MESSAGE_TYPES, type BrowserAiCommandContract } from "../src/protocol.js";
+import { BRIDGE_RESERVED_BROWSER_MESSAGE_TYPES, defineBridgeGameConfig, type BrowserAiCommandContract } from "../src/index.js";
 
 test("bridge exposes only reserved local browser messages, not a game command catalog", () => {
   const reserved = new Set<string>(BRIDGE_RESERVED_BROWSER_MESSAGE_TYPES);
@@ -34,6 +34,32 @@ test("browser command contract accepts open-ended game command types", () => {
   };
 
   assert.equal(command.type, "future_server_command");
+});
+
+test("game config defines reusable bridge defaults without Incarnate coupling", () => {
+  const config = defineBridgeGameConfig({
+    gameId: "example",
+    displayName: "Example",
+    signingNamespace: "example-auth",
+    protocol: {
+      authBegin: "login_begin",
+      authComplete: "login_complete"
+    }
+  });
+
+  assert.equal(config.gameId, "example");
+  assert.equal(config.signingNamespace, "example-auth");
+  assert.equal(config.protocol.authBegin, "login_begin");
+  assert.equal(config.protocol.authComplete, "login_complete");
+  assert(config.bridgeManagedBrowserCommandTypes.includes("login_complete"));
+});
+
+test("root package API exports reusable bridge primitives", async () => {
+  const api = await import("../src/index.js");
+  assert.equal(typeof api.defineBridgeGameConfig, "function");
+  assert.equal(typeof api.startBrowserBridgeServer, "function");
+  assert.equal(typeof api.ensureKeyPair, "function");
+  assert.equal(api.INCARNATE_GAME_CONFIG.gameId, "inc-realm");
 });
 
 test("package has no private monorepo runtime dependency", () => {

@@ -2,31 +2,55 @@
 import net from "node:net";
 import readline from "node:readline";
 import { randomUUID } from "node:crypto";
-import { defaultKeyPath, ensureKeyPair, fingerprintPublicKey, openSshTunnel, readPublicKey, signPayload, trustHost } from "./openssh.js";
+import { ensureKeyPair, fingerprintPublicKey, openSshTunnel, readPublicKey, signPayload, trustHost } from "./openssh.js";
 import { ensureLocalAccountKey } from "./local-bootstrap.js";
 import { startBrowserBridgeServer } from "./browser-server.js";
+import { loadBridgeGameConfig } from "./config.js";
+import { INCARNATE_GAME_CONFIG } from "./incarnate.js";
 function env(name, fallback = "") {
     return process.env[name] ?? fallback;
 }
+function envAny(names, fallback = "") {
+    for (const name of names) {
+        if (process.env[name] !== undefined) {
+            return process.env[name] ?? "";
+        }
+    }
+    return fallback;
+}
+function optionValue(args, names) {
+    for (let index = 0; index < args.length; index += 1) {
+        if (names.includes(args[index])) {
+            return args[index + 1] ?? "";
+        }
+    }
+    return "";
+}
+function resolveGameConfig(args) {
+    const configPath = optionValue(args, ["--game-config"]) || envAny(["BRIDGE_GAME_CONFIG", "INCARNATE_GAME_CONFIG"]);
+    return configPath ? loadBridgeGameConfig(configPath) : INCARNATE_GAME_CONFIG;
+}
 function parseCommonOptions(args) {
+    const gameConfig = resolveGameConfig(args);
     const options = {
-        transport: (env("INCARNATE_TRANSPORT", "local-direct") === "ssh" ? "ssh" : "local-direct"),
-        sshHost: env("INCARNATE_SSH_HOST", ""),
-        aiHost: env("INCARNATE_HOST", "127.0.0.1"),
-        aiPort: Number(env("INCARNATE_AI_PORT", "8083")),
-        repoRoot: env("INCARNATE_REPO_ROOT", process.cwd()),
-        account: env("INCARNATE_ACCOUNT", "matt"),
-        keyLabel: env("INCARNATE_KEY_LABEL", "local-dev"),
-        targetKeyLabel: env("INCARNATE_TARGET_KEY_LABEL", ""),
-        keyPath: env("INCARNATE_KEY_PATH", defaultKeyPath()),
-        targetKeyPath: env("INCARNATE_TARGET_KEY_PATH", ""),
-        character: env("INCARNATE_CHARACTER", ""),
-        radius: Number(env("INCARNATE_RADIUS", "14")),
-        wsHost: env("INCARNATE_BROWSER_BRIDGE_HOST", "127.0.0.1"),
-        wsPort: Number(env("INCARNATE_BROWSER_BRIDGE_PORT", "8787")),
-        browserOrigin: env("INCARNATE_BROWSER_ORIGIN", ""),
-        sessionToken: env("INCARNATE_BROWSER_SESSION_TOKEN", randomUUID()),
-        bootstrapLocal: env("INCARNATE_BOOTSTRAP_LOCAL_DEV", "false") === "true"
+        gameConfig,
+        transport: (envAny(["BRIDGE_TRANSPORT", "INCARNATE_TRANSPORT"], "local-direct") === "ssh" ? "ssh" : "local-direct"),
+        sshHost: envAny(["BRIDGE_SSH_HOST", "INCARNATE_SSH_HOST"], gameConfig.defaultSshHost),
+        aiHost: envAny(["BRIDGE_AI_HOST", "INCARNATE_HOST"], gameConfig.defaultAiHost),
+        aiPort: Number(envAny(["BRIDGE_AI_PORT", "INCARNATE_AI_PORT"], String(gameConfig.defaultAiPort))),
+        repoRoot: envAny(["BRIDGE_REPO_ROOT", "INCARNATE_REPO_ROOT"], process.cwd()),
+        account: envAny(["BRIDGE_ACCOUNT", "INCARNATE_ACCOUNT"], gameConfig.defaultAccount),
+        keyLabel: envAny(["BRIDGE_KEY_LABEL", "INCARNATE_KEY_LABEL"], gameConfig.defaultKeyLabel),
+        targetKeyLabel: envAny(["BRIDGE_TARGET_KEY_LABEL", "INCARNATE_TARGET_KEY_LABEL"], ""),
+        keyPath: envAny(["BRIDGE_KEY_PATH", "INCARNATE_KEY_PATH"], gameConfig.defaultKeyPath),
+        targetKeyPath: envAny(["BRIDGE_TARGET_KEY_PATH", "INCARNATE_TARGET_KEY_PATH"], ""),
+        character: envAny(["BRIDGE_CHARACTER", "INCARNATE_CHARACTER"], ""),
+        radius: Number(envAny(["BRIDGE_RADIUS", "INCARNATE_RADIUS"], "14")),
+        wsHost: envAny(["BRIDGE_BROWSER_BRIDGE_HOST", "INCARNATE_BROWSER_BRIDGE_HOST"], gameConfig.defaultBrowserBridgeHost),
+        wsPort: Number(envAny(["BRIDGE_BROWSER_BRIDGE_PORT", "INCARNATE_BROWSER_BRIDGE_PORT"], String(gameConfig.defaultBrowserBridgePort))),
+        browserOrigin: envAny(["BRIDGE_BROWSER_ORIGIN", "INCARNATE_BROWSER_ORIGIN"], ""),
+        sessionToken: envAny(["BRIDGE_BROWSER_SESSION_TOKEN", "INCARNATE_BROWSER_SESSION_TOKEN"], randomUUID()),
+        bootstrapLocal: envAny(["BRIDGE_BOOTSTRAP_LOCAL_DEV", "INCARNATE_BOOTSTRAP_LOCAL_DEV"], "false") === "true"
     };
     for (let index = 0; index < args.length; index += 1) {
         const arg = args[index];
@@ -79,6 +103,9 @@ function parseCommonOptions(args) {
         else if (arg === "--session-token") {
             options.sessionToken = next();
         }
+        else if (arg === "--game-config") {
+            next();
+        }
         else if (arg === "--bootstrap-local-dev") {
             options.bootstrapLocal = true;
         }
@@ -99,10 +126,13 @@ function validateTcpPort(port, label, allowZero = false) {
         throw new Error(`Invalid ${label}.`);
     }
 }
+function acceptedResult(packet, gameConfig) {
+    return gameConfig.protocol.authResultAcceptedFields.some((field) => packet[field] === true);
+}
 async function withTransport(options, action) {
     if (options.transport === "ssh") {
         if (!options.sshHost) {
-            throw new Error("SSH transport requires --ssh-host or INCARNATE_SSH_HOST.");
+            throw new Error("SSH transport requires --ssh-host, BRIDGE_SSH_HOST, or INCARNATE_SSH_HOST.");
         }
         const tunnel = await openSshTunnel(options.sshHost, options.aiPort);
         try {
@@ -169,18 +199,19 @@ async function connectCommandSocket(host, port) {
     };
 }
 async function authenticateConnection(connection, options) {
-    await connection.waitFor("hello");
-    connection.send({ type: "auth_begin", account: options.account, keyLabel: options.keyLabel });
-    const challenge = await connection.waitFor("auth_challenge");
-    const signature = signPayload(options.keyPath, String(challenge.signingPayload ?? ""));
-    connection.send({ type: "auth_complete", signature });
-    const result = await connection.waitFor("auth_result");
-    if (!(result.ok === true || result.accepted === true)) {
+    const protocol = options.gameConfig.protocol;
+    await connection.waitFor(protocol.hello);
+    connection.send({ type: protocol.authBegin, account: options.account, keyLabel: options.keyLabel });
+    const challenge = await connection.waitFor(protocol.authChallenge);
+    const signature = signPayload(options.keyPath, String(challenge[protocol.authChallengePayloadField] ?? ""), options.gameConfig.signingNamespace);
+    connection.send({ type: protocol.authComplete, signature });
+    const result = await connection.waitFor(protocol.authResult);
+    if (!acceptedResult(result, options.gameConfig)) {
         throw new Error(String(result.message ?? "Authentication failed."));
     }
 }
 async function commandKeyGenerate(options) {
-    ensureKeyPair(options.keyPath, `incarnate:${options.account}:${options.keyLabel}`);
+    ensureKeyPair(options.keyPath, `${options.gameConfig.gameId}:${options.account}:${options.keyLabel}`);
     const publicKey = readPublicKey(options.keyPath);
     process.stdout.write(`Key path: ${options.keyPath}\n`);
     process.stdout.write(`Public key: ${publicKey}\n`);
@@ -194,30 +225,31 @@ async function commandKeyInspect(options) {
 }
 async function commandHostTrust(options) {
     if (!options.sshHost) {
-        throw new Error("host trust requires --ssh-host or INCARNATE_SSH_HOST.");
+        throw new Error("host trust requires --ssh-host, BRIDGE_SSH_HOST, or INCARNATE_SSH_HOST.");
     }
     await trustHost(options.sshHost);
     process.stdout.write(`Trusted host alias: ${options.sshHost}\n`);
 }
 async function commandAccountCreate(options) {
-    ensureKeyPair(options.keyPath, `incarnate:${options.account}:${options.keyLabel}`);
+    const protocol = options.gameConfig.protocol;
+    ensureKeyPair(options.keyPath, `${options.gameConfig.gameId}:${options.account}:${options.keyLabel}`);
     const publicKey = readPublicKey(options.keyPath);
     await withTransport(options, async (resolved) => {
         const connection = await connectCommandSocket(resolved.host, resolved.port);
         try {
-            await connection.waitFor("hello");
+            await connection.waitFor(protocol.hello);
             connection.send({
-                type: "account_create_begin",
+                type: protocol.accountCreateBegin,
                 account: options.account,
                 keyLabel: options.keyLabel,
                 publicKey
             });
-            const challenge = await connection.waitFor("auth_challenge");
-            const signature = signPayload(options.keyPath, String(challenge.signingPayload ?? ""));
-            connection.send({ type: "account_create_complete", signature });
-            const result = await connection.waitFor("account_create_result");
+            const challenge = await connection.waitFor(protocol.authChallenge);
+            const signature = signPayload(options.keyPath, String(challenge[protocol.authChallengePayloadField] ?? ""), options.gameConfig.signingNamespace);
+            connection.send({ type: protocol.accountCreateComplete, signature });
+            const result = await connection.waitFor(protocol.accountCreateResult);
             process.stdout.write(`${String(result.message ?? "")}\n`);
-            if (!(result.ok === true || result.accepted === true)) {
+            if (!acceptedResult(result, options.gameConfig)) {
                 process.exitCode = 1;
             }
         }
@@ -227,25 +259,26 @@ async function commandAccountCreate(options) {
     });
 }
 async function commandAccountAddKey(options) {
+    const protocol = options.gameConfig.protocol;
     const addedKeyLabel = options.targetKeyLabel.trim() || options.keyLabel;
     const addedKeyPath = options.targetKeyPath.trim() || options.keyPath;
-    ensureKeyPair(addedKeyPath, `incarnate:${options.account}:${addedKeyLabel}`);
+    ensureKeyPair(addedKeyPath, `${options.gameConfig.gameId}:${options.account}:${addedKeyLabel}`);
     const publicKey = readPublicKey(addedKeyPath);
     await withTransport(options, async (resolved) => {
         const connection = await connectCommandSocket(resolved.host, resolved.port);
         try {
             await authenticateConnection(connection, options);
             connection.send({
-                type: "account_add_key_begin",
+                type: protocol.accountAddKeyBegin,
                 keyLabel: addedKeyLabel,
                 publicKey
             });
-            const challenge = await connection.waitFor("auth_challenge");
-            const signature = signPayload(addedKeyPath, String(challenge.signingPayload ?? ""));
-            connection.send({ type: "account_add_key_complete", signature });
-            const result = await connection.waitFor("account_add_key_result");
+            const challenge = await connection.waitFor(protocol.authChallenge);
+            const signature = signPayload(addedKeyPath, String(challenge[protocol.authChallengePayloadField] ?? ""), options.gameConfig.signingNamespace);
+            connection.send({ type: protocol.accountAddKeyComplete, signature });
+            const result = await connection.waitFor(protocol.accountAddKeyResult);
             process.stdout.write(`${String(result.message ?? "")}\n`);
-            if (!(result.ok === true || result.accepted === true)) {
+            if (!acceptedResult(result, options.gameConfig)) {
                 process.exitCode = 1;
             }
         }
@@ -255,12 +288,13 @@ async function commandAccountAddKey(options) {
     });
 }
 async function commandAccountListKeys(options) {
+    const protocol = options.gameConfig.protocol;
     await withTransport(options, async (resolved) => {
         const connection = await connectCommandSocket(resolved.host, resolved.port);
         try {
             await authenticateConnection(connection, options);
-            connection.send({ type: "account_keys" });
-            const result = await connection.waitFor("account_keys");
+            connection.send({ type: protocol.accountKeys });
+            const result = await connection.waitFor(protocol.accountKeys);
             process.stdout.write(`${JSON.stringify(result.keys ?? [], null, 2)}\n`);
         }
         finally {
@@ -269,6 +303,7 @@ async function commandAccountListKeys(options) {
     });
 }
 async function commandAccountRemoveKey(options) {
+    const protocol = options.gameConfig.protocol;
     const targetKeyLabel = options.targetKeyLabel.trim();
     if (!targetKeyLabel) {
         throw new Error("account remove-key requires --target-key-label.");
@@ -278,12 +313,12 @@ async function commandAccountRemoveKey(options) {
         try {
             await authenticateConnection(connection, options);
             connection.send({
-                type: "account_remove_key",
+                type: protocol.accountRemoveKey,
                 targetKeyLabel
             });
-            const result = await connection.waitFor("account_remove_key_result");
+            const result = await connection.waitFor(protocol.accountRemoveKeyResult);
             process.stdout.write(`${String(result.message ?? "")}\n`);
-            if (!(result.ok === true || result.accepted === true)) {
+            if (!acceptedResult(result, options.gameConfig)) {
                 process.exitCode = 1;
             }
         }
@@ -293,23 +328,24 @@ async function commandAccountRemoveKey(options) {
     });
 }
 async function commandBrowserStart(options) {
-    ensureKeyPair(options.keyPath, `incarnate:${options.account}:${options.keyLabel}`);
+    ensureKeyPair(options.keyPath, `${options.gameConfig.gameId}:${options.account}:${options.keyLabel}`);
     const publicKey = readPublicKey(options.keyPath);
     if (options.bootstrapLocal && options.transport === "local-direct") {
         ensureLocalAccountKey(options.repoRoot, options.account, options.keyLabel, publicKey);
     }
-    const resolvedOrigin = options.browserOrigin || `http://127.0.0.1:${env("INCARNATE_BROWSER_PORT", "4174")}`;
+    const resolvedOrigin = options.browserOrigin || `http://127.0.0.1:${envAny(["BRIDGE_BROWSER_PORT", "INCARNATE_BROWSER_PORT"], String(options.gameConfig.defaultBrowserOriginPort))}`;
     let resolved = { host: options.aiHost, port: options.aiPort };
     let tunnel = null;
     if (options.transport === "ssh") {
         if (!options.sshHost) {
-            throw new Error("SSH transport requires --ssh-host or INCARNATE_SSH_HOST.");
+            throw new Error("SSH transport requires --ssh-host, BRIDGE_SSH_HOST, or INCARNATE_SSH_HOST.");
         }
         const openedTunnel = await openSshTunnel(options.sshHost, options.aiPort);
         tunnel = openedTunnel;
         resolved = { host: openedTunnel.host, port: openedTunnel.port };
     }
     const server = await startBrowserBridgeServer({
+        gameConfig: options.gameConfig,
         aiHost: resolved.host,
         aiPort: resolved.port,
         wsHost: options.wsHost,
@@ -322,7 +358,7 @@ async function commandBrowserStart(options) {
         sessionToken: options.sessionToken,
         allowedOrigin: resolvedOrigin
     });
-    process.stdout.write(`Incarnate bridge listening on ws://${options.wsHost}:${server.port}/?token=${options.sessionToken}\n`);
+    process.stdout.write(`${options.gameConfig.displayName} bridge listening on ws://${options.wsHost}:${server.port}/?token=${options.sessionToken}\n`);
     process.stdout.write(`Allowed browser origin: ${resolvedOrigin}\n`);
     const stop = async () => {
         await server.close();

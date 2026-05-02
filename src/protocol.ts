@@ -1,3 +1,5 @@
+export { BRIDGE_RESERVED_BROWSER_MESSAGE_TYPES } from "./config.js";
+
 export type BrowserSessionState =
   | "connecting"
   | "connected"
@@ -5,11 +7,6 @@ export type BrowserSessionState =
   | "ready"
   | "disconnected"
   | "error";
-
-export const BRIDGE_RESERVED_BROWSER_MESSAGE_TYPES = [
-  "client_debug",
-  "bridge_device_key"
-] as const;
 
 export type BrowserAiCommandType = string;
 
