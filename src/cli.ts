@@ -40,6 +40,37 @@ type CommonOptions = TransportOptions & {
   bootstrapLocal: boolean;
 };
 
+const GENERIC_CLI_NAME = "game-bridge";
+const LEGACY_CLI_NAME = "incarnate-bridge";
+
+function usage() {
+  return `Usage: ${GENERIC_CLI_NAME} <key|host|account|browser> <action> [options]
+
+Commands:
+  key generate       Create a local Ed25519 SSH key if it does not exist
+  key inspect        Print the local public key and fingerprint
+  host trust         Trust a game SSH host through OpenSSH known_hosts
+  account create     Create/register an account key through the game server
+  account add-key    Add a new account key after authenticating locally
+  account list-keys  List registered account keys
+  account remove-key Deactivate a registered account key
+  browser start      Start the token-protected localhost browser bridge
+
+Common options:
+  --game-config <path>    Use another game's bridge.game.json
+  --transport <mode>      local-direct or ssh
+  --ssh-host <host>       SSH host alias for ssh transport
+  --key-path <path>       Local private key path
+  --account <name>        Account name
+
+${LEGACY_CLI_NAME} is an alias for Incarnate compatibility.
+`;
+}
+
+function isHelpRequest(args: string[]) {
+  return args.length === 0 || args.includes("--help") || args.includes("-h") || args[0] === "help";
+}
+
 function env(name: string, fallback = "") {
   return process.env[name] ?? fallback;
 }
@@ -412,6 +443,10 @@ async function commandBrowserStart(options: CommonOptions) {
 
 async function main() {
   const args = process.argv.slice(2);
+  if (isHelpRequest(args)) {
+    process.stdout.write(usage());
+    return;
+  }
   const [scope = "", action = "", ...rest] = args;
   const options = parseCommonOptions(rest);
   if (scope === "key" && action === "generate") {
@@ -446,7 +481,7 @@ async function main() {
     await commandBrowserStart(options);
     return;
   }
-  throw new Error("Usage: incarnate-bridge <key|host|account|browser> <action> [options]");
+  throw new Error(usage().trimEnd());
 }
 
 main().catch((error) => {

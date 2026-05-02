@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { BRIDGE_RESERVED_BROWSER_MESSAGE_TYPES, defineBridgeGameConfig, type BrowserAiCommandContract } from "../src/index.js";
 
 test("bridge exposes only reserved local browser messages, not a game command catalog", () => {
@@ -64,6 +66,7 @@ test("root package API exports reusable bridge primitives", async () => {
 
 test("package has no private monorepo runtime dependency", () => {
   const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
+    bin?: Record<string, string>;
     dependencies?: Record<string, string>;
     devDependencies?: Record<string, string>;
     workspaces?: unknown;
@@ -75,4 +78,18 @@ test("package has no private monorepo runtime dependency", () => {
 
   assert.equal(packageJson.workspaces, undefined, "standalone package must not declare workspaces");
   assert.equal(dependencies["@incarnate/protocol-ts"], undefined, "standalone bridge must not import private protocol workspace");
+  assert.equal(packageJson.bin?.["game-bridge"], "dist/cli.js", "generic CLI alias should be available for other games");
+  assert.equal(packageJson.bin?.["incarnate-bridge"], "dist/cli.js", "Incarnate CLI alias should remain for compatibility");
+});
+
+test("CLI help is generic and exits successfully", () => {
+  const cliPath = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
+  const result = spawnSync(process.execPath, ["--import", "tsx", cliPath, "--help"], {
+    encoding: "utf8"
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Usage: game-bridge/);
+  assert.match(result.stdout, /incarnate-bridge is an alias/);
+  assert.match(result.stdout, /--game-config <path>/);
 });
