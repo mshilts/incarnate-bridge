@@ -1,5 +1,6 @@
-import { createServer, type Server as HttpServer } from "node:http";
-import { timingSafeEqual } from "node:crypto";
+import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from "node:http";
+import { randomUUID, timingSafeEqual } from "node:crypto";
+import { readFileSync } from "node:fs";
 import net from "node:net";
 import type { AddressInfo } from "node:net";
 import { WebSocketServer, type WebSocket } from "ws";
@@ -27,10 +28,25 @@ export interface BrowserBridgeOptions {
   radius: number;
   sessionToken: string;
   allowedOrigin: string;
+  instanceId?: string;
+  ownerHost?: string;
+  ownerAccount?: string;
+  ownerKeyLabel?: string;
+  keyFingerprint?: string;
+  lifecycleTimings?: Partial<BrowserBridgeLifecycleTimings>;
+}
+
+export interface BrowserBridgeLifecycleTimings {
+  initialAttachTimeoutMs: number;
+  reconnectGraceMs: number;
+  browserPingIntervalMs: number;
+  browserPongTimeoutMs: number;
+  closeTimeoutMs: number;
 }
 
 export interface BrowserBridgeServer {
   close: () => Promise<void>;
+  closed: Promise<void>;
   port: number;
 }
 
@@ -39,17 +55,79 @@ const BRIDGE_RESERVED_MESSAGES = new Set<string>(BRIDGE_RESERVED_BROWSER_MESSAGE
 const MAX_BROWSER_MESSAGE_BYTES = 64 * 1024;
 const MAX_WEBSOCKET_FRAME_BYTES = 1024 * 1024;
 const MAX_AI_LINE_BYTES = 1024 * 1024;
+const STATUS_PATH = "/__incarnate/status";
+const DEFAULT_LIFECYCLE_TIMINGS: BrowserBridgeLifecycleTimings = {
+  initialAttachTimeoutMs: 60_000,
+  reconnectGraceMs: 5_000,
+  browserPingIntervalMs: 10_000,
+  browserPongTimeoutMs: 10_000,
+  closeTimeoutMs: 500
+};
+const BRIDGE_VERSION = readBridgeVersion();
 
 export async function startBrowserBridgeServer(options: BrowserBridgeOptions): Promise<BrowserBridgeServer> {
   if (!options.sessionToken) {
     throw new Error("Browser bridge session token must not be empty.");
   }
-  const httpServer = createServer();
+  const timings = { ...DEFAULT_LIFECYCLE_TIMINGS, ...options.lifecycleTimings };
+  validateLifecycleTimings(timings);
+  const instanceId = options.instanceId ?? randomUUID();
+  const startedAt = new Date().toISOString();
+  let session: BridgeSession | null = null;
+  let closing = false;
+  let initialAttachTimer: ReturnType<typeof setTimeout> | null = null;
+  let closePromise: Promise<void> | null = null;
+  let resolveClosed!: () => void;
+  const closed = new Promise<void>((resolve) => {
+    resolveClosed = resolve;
+  });
+  let closeServer: () => Promise<void> = async () => {};
+  const httpServer = createServer((request, response) => {
+    if (request.url?.split("?", 1)[0] !== STATUS_PATH) {
+      writeJsonResponse(response, 404, { error: "not_found" });
+      return;
+    }
+    if (request.method !== "GET") {
+      response.setHeader("Allow", "GET");
+      writeJsonResponse(response, 405, { error: "method_not_allowed" });
+      return;
+    }
+    if (!hasBearerToken(request, options.sessionToken)) {
+      writeJsonResponse(response, 401, { error: "unauthorized" });
+      return;
+    }
+    if (!isLoopbackAddress(request.socket.remoteAddress)) {
+      writeJsonResponse(response, 403, { error: "loopback_only" });
+      return;
+    }
+    if (closing) {
+      writeJsonResponse(response, 410, { error: "bridge_closing" });
+      return;
+    }
+    writeJsonResponse(response, 200, {
+      version: BRIDGE_VERSION,
+      instanceId,
+      host: options.ownerHost || options.aiHost,
+      account: session?.getActiveAccount() ?? "",
+      ownerAccount: options.ownerAccount ?? options.account.trim(),
+      keyLabel: options.keyLabel,
+      ownerKeyLabel: options.ownerKeyLabel ?? options.keyLabel,
+      keyFingerprint: options.keyFingerprint ?? "",
+      character: session?.getActiveCharacter() ?? "",
+      state: closing ? "closing" : session?.isBrowserAttached() ? "attached" : session ? "detached" : "waiting",
+      sessionState: session?.getRuntimeState() ?? "not_started",
+      browserAttached: session?.isBrowserAttached() ?? false,
+      startedAt
+    });
+  });
   const wsServer = new WebSocketServer({ server: httpServer, maxPayload: MAX_WEBSOCKET_FRAME_BYTES });
   const gameConfig = options.gameConfig ?? INCARNATE_GAME_CONFIG;
-  let session: BridgeSession | null = null;
 
   wsServer.on("connection", (socket, request) => {
+    if (closing) {
+      socket.close(1001, "Bridge shutting down.");
+      return;
+    }
     const token = new URL(request.url ?? "/", `http://${options.wsHost}:${options.wsPort}`).searchParams.get("token") ?? "";
     const origin = String(request.headers.origin ?? "");
     if (!constantTimeEqual(token, options.sessionToken)) {
@@ -60,10 +138,19 @@ export async function startBrowserBridgeServer(options: BrowserBridgeOptions): P
       socket.close(1008, "Origin not allowed.");
       return;
     }
+    if (initialAttachTimer) {
+      clearTimeout(initialAttachTimer);
+      initialAttachTimer = null;
+    }
     if (!session || session.isClosed()) {
-      session = new BridgeSession(options, gameConfig, () => {
-        session = null;
+      let createdSession: BridgeSession;
+      createdSession = new BridgeSession(options, gameConfig, timings, () => {
+        if (session === createdSession) {
+          session = null;
+        }
+        void closeServer();
       });
+      session = createdSession;
       session.start();
     }
     session.attachSocket(socket);
@@ -78,18 +165,51 @@ export async function startBrowserBridgeServer(options: BrowserBridgeOptions): P
   });
 
   const address = httpServer.address() as AddressInfo | null;
+  closeServer = () => {
+    if (closePromise) {
+      return closePromise;
+    }
+    closing = true;
+    closePromise = (async () => {
+      await Promise.resolve();
+      if (initialAttachTimer) {
+        clearTimeout(initialAttachTimer);
+        initialAttachTimer = null;
+      }
+      const currentSession = session;
+      session = null;
+      currentSession?.close();
+      for (const socket of wsServer.clients) {
+        if (socket.readyState === socket.OPEN || socket.readyState === socket.CONNECTING) {
+          socket.close(1001, "Bridge session ended.");
+        }
+      }
+      const forceCloseTimer = setTimeout(() => {
+        for (const socket of wsServer.clients) {
+          socket.terminate();
+        }
+        httpServer.closeAllConnections();
+      }, timings.closeTimeoutMs);
+      forceCloseTimer.unref();
+      try {
+        await Promise.all([
+          new Promise<void>((resolve) => wsServer.close(() => resolve())),
+          closeHttpServer(httpServer)
+        ]);
+      } finally {
+        clearTimeout(forceCloseTimer);
+        resolveClosed();
+      }
+    })();
+    return closePromise;
+  };
+  initialAttachTimer = setTimeout(() => {
+    void closeServer();
+  }, timings.initialAttachTimeoutMs);
   return {
     port: address?.port ?? options.wsPort,
-    close: async () => {
-      if (session) {
-        session.close();
-        session = null;
-      }
-      await Promise.all([
-        new Promise<void>((resolve) => wsServer.close(() => resolve())),
-        closeHttpServer(httpServer)
-      ]);
-    }
+    close: closeServer,
+    closed
   };
 }
 
@@ -104,14 +224,23 @@ class BridgeSession {
   private sessionState: BrowserSessionState = "connecting";
   private sessionStateMessage = "";
   private activeCharacter = "";
+  private activeAccount = "";
   private activeMapName = "";
   private lastLifecyclePacket: Record<string, unknown> | null = null;
   private pendingChallengeKind: "auth" | "account_create" | "account_add_key" | "" = "";
   private authenticated = false;
+  private socketGeneration = 0;
+  private detachTimer: ReturnType<typeof setTimeout> | null = null;
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private browserPongTimer: ReturnType<typeof setTimeout> | null = null;
+  private socketCloseTimer: ReturnType<typeof setTimeout> | null = null;
+  private pendingBrowserPing: Buffer | null = null;
+  private browserPingSequence = 0;
 
   constructor(
     private readonly options: BrowserBridgeOptions,
     private readonly gameConfig: BridgeGameConfig,
+    private readonly timings: BrowserBridgeLifecycleTimings,
     private readonly onClosed: () => void
   ) {}
 
@@ -125,22 +254,55 @@ class BridgeSession {
     return this.closed;
   }
 
+  getActiveAccount() {
+    return this.activeAccount;
+  }
+
+  getActiveCharacter() {
+    return this.activeCharacter;
+  }
+
+  getRuntimeState() {
+    return this.closed ? "closed" : this.sessionState;
+  }
+
+  isBrowserAttached() {
+    return this.socket !== null && this.socket.readyState === this.socket.OPEN;
+  }
+
   attachSocket(socket: WebSocket) {
     if (this.closed) {
       socket.close();
       return;
     }
-    if (this.socket && this.socket !== socket) {
+    if (this.detachTimer) {
+      clearTimeout(this.detachTimer);
+      this.detachTimer = null;
+    }
+    this.clearHeartbeatTimer();
+    const previousSocket = this.socket;
+    const generation = ++this.socketGeneration;
+    if (previousSocket && previousSocket !== socket) {
       try {
-        this.socket.close();
+        previousSocket.close(4001, "Browser session replaced.");
       } catch (_error) {
         // Ignore stale socket close failures during browser reload.
       }
     }
     this.socket = socket;
-    socket.on("message", (payload) => this.onBrowserMessage(payload));
-    socket.on("close", () => this.detachSocket(socket));
-    socket.on("error", () => this.detachSocket(socket));
+    socket.on("message", (payload) => this.onBrowserMessage(socket, generation, payload));
+    socket.on("pong", (payload: Buffer) => {
+      if (
+        this.socket === socket &&
+        this.socketGeneration === generation &&
+        this.pendingBrowserPing?.equals(payload)
+      ) {
+        this.clearBrowserPongTimer();
+      }
+    });
+    socket.on("close", () => this.detachSocket(socket, generation));
+    socket.on("error", () => this.detachSocket(socket, generation));
+    this.startBrowserHeartbeat(socket, generation);
     this.replayBrowserSession();
   }
 
@@ -149,20 +311,41 @@ class BridgeSession {
       return;
     }
     this.closed = true;
+    this.clearBrowserTimers();
     this.aiSocket?.destroy();
     this.aiSocket = null;
-    if (this.socket && (this.socket.readyState === this.socket.OPEN || this.socket.readyState === this.socket.CONNECTING)) {
-      this.socket.close();
-    }
+    const socket = this.socket;
     this.socket = null;
+    this.socketGeneration += 1;
+    if (socket && (socket.readyState === socket.OPEN || socket.readyState === socket.CONNECTING)) {
+      socket.close(1000, "Bridge session ended.");
+      const closeTimer = setTimeout(() => {
+        if (this.socketCloseTimer === closeTimer) {
+          this.socketCloseTimer = null;
+        }
+        socket.terminate();
+      }, this.timings.closeTimeoutMs);
+      this.socketCloseTimer = closeTimer;
+      socket.once("close", () => {
+        if (this.socketCloseTimer === closeTimer) {
+          clearTimeout(closeTimer);
+          this.socketCloseTimer = null;
+        }
+      });
+      closeTimer.unref();
+    }
     this.onClosed();
   }
 
   private connectAiSocket() {
     const aiSocket = net.createConnection({ host: this.options.aiHost, port: this.options.aiPort }, () => {
-      this.aiSocket = aiSocket;
+      if (this.closed || this.aiSocket !== aiSocket) {
+        aiSocket.destroy();
+        return;
+      }
       this.emitSessionState("connected", "Connected to the Incarnate AI socket.");
     });
+    this.aiSocket = aiSocket;
     aiSocket.setEncoding("utf8");
     aiSocket.on("data", (chunk) => this.onAiData(String(chunk)));
     aiSocket.on("error", (error) => {
@@ -179,7 +362,10 @@ class BridgeSession {
     });
   }
 
-  private onBrowserMessage(payload: Buffer | ArrayBuffer | Buffer[]) {
+  private onBrowserMessage(socket: WebSocket, generation: number, payload: Buffer | ArrayBuffer | Buffer[]) {
+    if (this.closed || this.socket !== socket || this.socketGeneration !== generation) {
+      return;
+    }
     const raw = browserPayloadToUtf8(payload);
     if (Buffer.byteLength(raw, "utf8") > MAX_BROWSER_MESSAGE_BYTES) {
       this.emitSessionError("browser_message_too_large", "Browser bridge message exceeded the maximum accepted size.");
@@ -207,6 +393,10 @@ class BridgeSession {
     }
     if (hasControlCharacters(type) || type !== type.trim()) {
       this.emitSessionError("invalid_browser_command", "Browser bridge command type must not contain whitespace or control characters.");
+      return;
+    }
+    if (type === "bridge_disconnect") {
+      this.close();
       return;
     }
     if (BRIDGE_RESERVED_MESSAGES.has(type) || this.gameConfig.reservedBrowserMessageTypes.includes(type)) {
@@ -335,6 +525,9 @@ class BridgeSession {
     if (type === protocol.authResult) {
       const ok = protocol.authResultAcceptedFields.some((field) => packet[field] === true);
       this.authenticated = ok;
+      if (ok && typeof packet.account === "string") {
+        this.activeAccount = packet.account.trim();
+      }
       if (!ok) {
         this.emitSessionError("auth_failed", String(packet.message ?? "Authentication failed."));
       }
@@ -517,9 +710,97 @@ class BridgeSession {
     }
   }
 
-  private detachSocket(socket: WebSocket) {
-    if (this.socket === socket) {
-      this.socket = null;
+  private detachSocket(socket: WebSocket, generation: number) {
+    if (this.socket !== socket || this.socketGeneration !== generation || this.closed) {
+      return;
+    }
+    this.socket = null;
+    this.clearHeartbeatTimer();
+    const detachedGeneration = ++this.socketGeneration;
+    if (this.detachTimer) {
+      clearTimeout(this.detachTimer);
+    }
+    this.detachTimer = setTimeout(() => {
+      this.detachTimer = null;
+      if (!this.closed && this.socket === null && this.socketGeneration === detachedGeneration) {
+        this.close();
+      }
+    }, this.timings.reconnectGraceMs);
+  }
+
+  private startBrowserHeartbeat(socket: WebSocket, generation: number) {
+    const sendPing = () => {
+      if (this.closed || this.socket !== socket || this.socketGeneration !== generation) {
+        return;
+      }
+      if (socket.readyState !== socket.OPEN) {
+        socket.terminate();
+        this.detachSocket(socket, generation);
+        return;
+      }
+      if (this.pendingBrowserPing) {
+        return;
+      }
+      const pingPayload = Buffer.from(`${generation}:${++this.browserPingSequence}`);
+      this.pendingBrowserPing = pingPayload;
+      const pongTimer = setTimeout(() => {
+        if (
+          this.socket !== socket ||
+          this.socketGeneration !== generation ||
+          !this.pendingBrowserPing?.equals(pingPayload)
+        ) {
+          return;
+        }
+        this.browserPongTimer = null;
+        this.pendingBrowserPing = null;
+        socket.terminate();
+        this.detachSocket(socket, generation);
+      }, this.timings.browserPongTimeoutMs);
+      this.browserPongTimer = pongTimer;
+      pongTimer.unref();
+      try {
+        socket.ping(pingPayload, false, (error) => {
+          if (error && this.socket === socket && this.socketGeneration === generation) {
+            this.clearBrowserPongTimer();
+            socket.terminate();
+            this.detachSocket(socket, generation);
+          }
+        });
+      } catch (_error) {
+        this.clearBrowserPongTimer();
+        socket.terminate();
+        this.detachSocket(socket, generation);
+      }
+    };
+    this.heartbeatTimer = setInterval(sendPing, this.timings.browserPingIntervalMs);
+    sendPing();
+  }
+
+  private clearHeartbeatTimer() {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+    this.clearBrowserPongTimer();
+  }
+
+  private clearBrowserPongTimer() {
+    if (this.browserPongTimer) {
+      clearTimeout(this.browserPongTimer);
+      this.browserPongTimer = null;
+    }
+    this.pendingBrowserPing = null;
+  }
+
+  private clearBrowserTimers() {
+    this.clearHeartbeatTimer();
+    if (this.detachTimer) {
+      clearTimeout(this.detachTimer);
+      this.detachTimer = null;
+    }
+    if (this.socketCloseTimer) {
+      clearTimeout(this.socketCloseTimer);
+      this.socketCloseTimer = null;
     }
   }
 
@@ -583,6 +864,47 @@ function constantTimeEqual(left: string, right: string) {
     return false;
   }
   return timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function validateLifecycleTimings(timings: BrowserBridgeLifecycleTimings) {
+  const positive = [
+    timings.initialAttachTimeoutMs,
+    timings.browserPingIntervalMs,
+    timings.browserPongTimeoutMs,
+    timings.closeTimeoutMs
+  ];
+  if (positive.some((value) => !Number.isSafeInteger(value) || value <= 0)) {
+    throw new Error("Browser bridge lifecycle timeouts must be positive integer milliseconds.");
+  }
+  if (!Number.isSafeInteger(timings.reconnectGraceMs) || timings.reconnectGraceMs < 0) {
+    throw new Error("Browser bridge reconnect grace must be a non-negative integer number of milliseconds.");
+  }
+}
+
+function hasBearerToken(request: IncomingMessage, expectedToken: string) {
+  const authorization = request.headers.authorization ?? "";
+  return authorization.startsWith("Bearer ")
+    && constantTimeEqual(authorization.slice("Bearer ".length), expectedToken);
+}
+
+function isLoopbackAddress(address: string | undefined) {
+  const normalized = address?.toLowerCase().replace(/^::ffff:/, "");
+  return normalized === "::1" || normalized?.startsWith("127.") === true;
+}
+
+function writeJsonResponse(response: ServerResponse, status: number, payload: Record<string, unknown>) {
+  const body = JSON.stringify(payload);
+  response.writeHead(status, {
+    "Cache-Control": "no-store",
+    "Content-Length": Buffer.byteLength(body),
+    "Content-Type": "application/json; charset=utf-8"
+  });
+  response.end(body);
+}
+
+function readBridgeVersion() {
+  const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version?: unknown };
+  return typeof packageJson.version === "string" ? packageJson.version : "unknown";
 }
 
 async function closeHttpServer(server: HttpServer) {

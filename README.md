@@ -66,6 +66,22 @@ Incarnate bridge listening on ws://127.0.0.1:8787/?token=<random-token>
 The token is required. A random website cannot use the bridge unless it knows
 the token and passes the configured browser origin policy.
 
+The bridge keeps its game connection for up to five seconds after a browser
+socket closes so a page reload can reattach. It checks browser liveness with a
+WebSocket ping every ten seconds and a ten-second pong deadline; silent browser
+loss triggers teardown within twenty-five seconds, including reconnect grace. A
+bridge with no initial browser connection exits after sixty seconds. The reserved
+`bridge_disconnect` message ends the game connection immediately.
+
+Local launchers can query `GET /__incarnate/status` on the same loopback port
+with `Authorization: Bearer <session-token>`. The response reports the bridge
+instance ID, target host/account/key profile, active character, browser
+attachment state, bridge lifecycle state, upstream session state, and package
+version. The token is the same random value used in the WebSocket URL. Status
+requests without it receive `401`; unknown paths receive `404`.
+Status requests are accepted only from loopback addresses; remote requests with
+the token receive `403`.
+
 ## Use Another Game
 
 Create a `bridge.game.json`:

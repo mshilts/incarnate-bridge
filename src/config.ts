@@ -59,7 +59,8 @@ export type BridgeGameConfigInput = Partial<Omit<BridgeGameConfig, "protocol">> 
 
 export const BRIDGE_RESERVED_BROWSER_MESSAGE_TYPES = [
   "client_debug",
-  "bridge_device_key"
+  "bridge_device_key",
+  "bridge_disconnect"
 ] as const;
 
 export const DEFAULT_BRIDGE_PROTOCOL_CONFIG: BridgeProtocolConfig = {

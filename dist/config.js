@@ -3,7 +3,8 @@ import os from "node:os";
 import path from "node:path";
 export const BRIDGE_RESERVED_BROWSER_MESSAGE_TYPES = [
     "client_debug",
-    "bridge_device_key"
+    "bridge_device_key",
+    "bridge_disconnect"
 ];
 export const DEFAULT_BRIDGE_PROTOCOL_CONFIG = {
     hello: "hello",

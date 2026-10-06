@@ -12,9 +12,23 @@ export interface BrowserBridgeOptions {
     radius: number;
     sessionToken: string;
     allowedOrigin: string;
+    instanceId?: string;
+    ownerHost?: string;
+    ownerAccount?: string;
+    ownerKeyLabel?: string;
+    keyFingerprint?: string;
+    lifecycleTimings?: Partial<BrowserBridgeLifecycleTimings>;
+}
+export interface BrowserBridgeLifecycleTimings {
+    initialAttachTimeoutMs: number;
+    reconnectGraceMs: number;
+    browserPingIntervalMs: number;
+    browserPongTimeoutMs: number;
+    closeTimeoutMs: number;
 }
 export interface BrowserBridgeServer {
     close: () => Promise<void>;
+    closed: Promise<void>;
     port: number;
 }
 export declare function startBrowserBridgeServer(options: BrowserBridgeOptions): Promise<BrowserBridgeServer>;

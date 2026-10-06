@@ -50,7 +50,7 @@ export type BridgeGameConfig = {
 export type BridgeGameConfigInput = Partial<Omit<BridgeGameConfig, "protocol">> & {
     protocol?: Partial<BridgeProtocolConfig>;
 };
-export declare const BRIDGE_RESERVED_BROWSER_MESSAGE_TYPES: readonly ["client_debug", "bridge_device_key"];
+export declare const BRIDGE_RESERVED_BROWSER_MESSAGE_TYPES: readonly ["client_debug", "bridge_device_key", "bridge_disconnect"];
 export declare const DEFAULT_BRIDGE_PROTOCOL_CONFIG: BridgeProtocolConfig;
 export declare function defineBridgeGameConfig(input: BridgeGameConfigInput): BridgeGameConfig;
 export declare function loadBridgeGameConfig(configPath: string): BridgeGameConfig;

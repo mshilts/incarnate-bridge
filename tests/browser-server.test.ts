@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import net from "node:net";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { WebSocket } from "ws";
 import { startBrowserBridgeServer } from "../src/browser-server.js";
@@ -63,6 +65,289 @@ test("browser bridge refuses to start without a session token", async () => {
       /session token/
     );
   } finally {
+    await mockAi.close();
+    key.close();
+  }
+});
+
+test("status is bearer protected and reports bridge identity separately from game readiness", async () => {
+  const key = createTestKey();
+  const mockAi = await startMockAiServer();
+  const bridge = await startBrowserBridgeServer({
+    aiHost: "127.0.0.1",
+    aiPort: mockAi.port,
+    wsHost: "127.0.0.1",
+    wsPort: 0,
+    account: "matt",
+    keyLabel: "device",
+    keyPath: key.path,
+    character: "Matthew_mage",
+    radius: 6,
+    sessionToken: TOKEN,
+    allowedOrigin: ORIGIN,
+    instanceId: "launcher-owner-id",
+    ownerHost: "game.example",
+    ownerAccount: "matt",
+    ownerKeyLabel: "laptop",
+    keyFingerprint: "SHA256:public-key-fingerprint",
+    lifecycleTimings: { initialAttachTimeoutMs: 2_000 }
+  });
+
+  try {
+    const url = `http://127.0.0.1:${bridge.port}/__incarnate/status`;
+    assert.equal((await fetch(url)).status, 401, "status must require the bridge session token");
+    assert.equal((await fetch(url, { headers: { Authorization: "Bearer wrong-token" } })).status, 401);
+    const waitingResponse = await fetch(url, { headers: { Authorization: `Bearer ${TOKEN}` } });
+    assert.equal(waitingResponse.status, 200);
+    const waiting = await waitingResponse.json() as Record<string, unknown>;
+    assert.equal(waiting.instanceId, "launcher-owner-id");
+    assert.equal(waiting.host, "game.example");
+    assert.equal(waiting.ownerAccount, "matt");
+    assert.equal(waiting.ownerKeyLabel, "laptop");
+    assert.equal(waiting.keyFingerprint, "SHA256:public-key-fingerprint");
+    assert.equal(waiting.state, "waiting");
+    assert.equal(waiting.sessionState, "not_started");
+    assert.equal(waiting.browserAttached, false);
+
+    const client = await connectBrowser(bridge.port);
+    await waitFor(() => client.packets.some((packet) => packet.type === "session_ready"), "session should become ready");
+    const attachedResponse = await fetch(url, { headers: { Authorization: `Bearer ${TOKEN}` } });
+    const attached = await attachedResponse.json() as Record<string, unknown>;
+    assert.equal(attached.state, "attached");
+    assert.equal(attached.sessionState, "ready");
+    assert.equal(attached.browserAttached, true);
+    assert.equal(attached.account, "matt");
+    assert.equal(attached.character, "Matthew_mage");
+
+    const unauthorized = new WebSocket(`ws://127.0.0.1:${bridge.port}?token=wrong-token`, {
+      headers: { Origin: ORIGIN }
+    });
+    const [closeCode] = await once(unauthorized, "close") as [number, Buffer];
+    assert.equal(closeCode, 1008, "an invalid token cannot control the live session");
+    assert.equal(client.ws.readyState, WebSocket.OPEN, "rejecting another socket leaves the owning browser attached");
+
+    client.ws.send(JSON.stringify({ type: "bridge_disconnect" }));
+    await once(client.ws, "close");
+    await bridge.closed;
+    await waitFor(() => mockAi.closedConnectionCount === 1, "disconnect should close the game socket");
+    assert.equal(mockAi.connectionCount, 1, "disconnect closes the existing upstream instead of opening another session");
+  } finally {
+    await bridge.close();
+    await mockAi.close();
+    key.close();
+  }
+});
+
+test("browser reconnect cancels the detach timer and stale timer generation", async () => {
+  const key = createTestKey();
+  const mockAi = await startMockAiServer();
+  const bridge = await startBrowserBridgeServer({
+    aiHost: "127.0.0.1",
+    aiPort: mockAi.port,
+    wsHost: "127.0.0.1",
+    wsPort: 0,
+    account: "",
+    keyLabel: "device",
+    keyPath: key.path,
+    character: "Matthew_mage",
+    radius: 6,
+    sessionToken: TOKEN,
+    allowedOrigin: ORIGIN,
+    lifecycleTimings: {
+      initialAttachTimeoutMs: 2_000,
+      reconnectGraceMs: 100,
+      browserPingIntervalMs: 500,
+      browserPongTimeoutMs: 1_000,
+      closeTimeoutMs: 50
+    }
+  });
+
+  try {
+    const first = await connectBrowser(bridge.port);
+    await waitFor(() => hasReadyBrowserSession(first.packets), "initial browser should be ready");
+    first.ws.close();
+    await once(first.ws, "close");
+    await waitForStatusState(bridge.port, TOKEN, "detached");
+    await delay(40);
+
+    const second = await connectBrowser(bridge.port);
+    await waitFor(() => hasReadyBrowserSession(second.packets), "replacement browser should resume the session");
+    await delay(100);
+    assert.equal(mockAi.connectionCount, 1, "reload reuses the original AI session");
+    assert.equal(second.ws.readyState, WebSocket.OPEN, "the old detach timer must not close a reattached browser");
+    await waitForStatusState(bridge.port, TOKEN, "attached");
+
+    second.ws.close();
+    await once(second.ws, "close");
+    await waitForStatusState(bridge.port, TOKEN, "detached");
+    await bridge.closed;
+    await waitFor(() => mockAi.closedConnectionCount === 1, "expired reconnect grace should close the game socket");
+  } finally {
+    await bridge.close();
+    await mockAi.close();
+    key.close();
+  }
+});
+
+test("a replacement browser gets ownership without reconnecting the replaced socket", async () => {
+  const key = createTestKey();
+  const mockAi = await startMockAiServer();
+  const bridge = await startBrowserBridgeServer({
+    aiHost: "127.0.0.1",
+    aiPort: mockAi.port,
+    wsHost: "127.0.0.1",
+    wsPort: 0,
+    account: "",
+    keyLabel: "device",
+    keyPath: key.path,
+    character: "Matthew_mage",
+    radius: 6,
+    sessionToken: TOKEN,
+    allowedOrigin: ORIGIN,
+    lifecycleTimings: {
+      initialAttachTimeoutMs: 2_000,
+      reconnectGraceMs: 100,
+      browserPingIntervalMs: 500,
+      browserPongTimeoutMs: 1_000,
+      closeTimeoutMs: 50
+    }
+  });
+
+  try {
+    const first = await connectBrowser(bridge.port);
+    await waitFor(() => hasReadyBrowserSession(first.packets), "first browser should be ready");
+
+    const second = await connectBrowser(bridge.port);
+    const [closeCode, closeReason] = await once(first.ws, "close") as [number, Buffer];
+    assert.equal(closeCode, 4001, "replacement is explicit so the old browser does not auto-reconnect");
+    assert.match(closeReason.toString(), /replaced/i);
+    await waitFor(() => hasReadyBrowserSession(second.packets), "replacement browser should resume the session");
+    assert.equal((await fetch(`http://127.0.0.1:${bridge.port}/__incarnate/status`, {
+      headers: { Authorization: `Bearer ${TOKEN}` }
+    }).then((response) => response.json()) as Record<string, unknown>).state, "attached");
+    assert.equal(mockAi.connectionCount, 1, "replacing a browser keeps one authenticated game session");
+
+    second.ws.send(JSON.stringify({ type: "bridge_disconnect" }));
+    await once(second.ws, "close");
+    await bridge.closed;
+  } finally {
+    await bridge.close();
+    await mockAi.close();
+    key.close();
+  }
+});
+
+test("browser bridge expires without an initial browser attachment", async () => {
+  const key = createTestKey();
+  const mockAi = await startMockAiServer();
+  const bridge = await startBrowserBridgeServer({
+    aiHost: "127.0.0.1",
+    aiPort: mockAi.port,
+    wsHost: "127.0.0.1",
+    wsPort: 0,
+    account: "",
+    keyLabel: "device",
+    keyPath: key.path,
+    character: "",
+    radius: 6,
+    sessionToken: TOKEN,
+    allowedOrigin: ORIGIN,
+    lifecycleTimings: { initialAttachTimeoutMs: 50, closeTimeoutMs: 25 }
+  });
+
+  try {
+    await bridge.closed;
+    assert.equal(mockAi.connectionCount, 0, "no game session starts before an authenticated browser attaches");
+  } finally {
+    await bridge.close();
+    await mockAi.close();
+    key.close();
+  }
+});
+
+test("browser heartbeat expires a silent browser and closes its game session", async () => {
+  const key = createTestKey();
+  const mockAi = await startMockAiServer();
+  const bridge = await startBrowserBridgeServer({
+    aiHost: "127.0.0.1",
+    aiPort: mockAi.port,
+    wsHost: "127.0.0.1",
+    wsPort: 0,
+    account: "",
+    keyLabel: "device",
+    keyPath: key.path,
+    character: "Matthew_mage",
+    radius: 6,
+    sessionToken: TOKEN,
+    allowedOrigin: ORIGIN,
+    lifecycleTimings: {
+      initialAttachTimeoutMs: 2_000,
+      reconnectGraceMs: 20,
+      browserPingIntervalMs: 20,
+      browserPongTimeoutMs: 60,
+      closeTimeoutMs: 25
+    }
+  });
+  let closed = false;
+  void bridge.closed.then(() => { closed = true; });
+
+  try {
+    const packets: Array<Record<string, unknown>> = [];
+    const silent = new WebSocket(`ws://127.0.0.1:${bridge.port}?token=${encodeURIComponent(TOKEN)}`, {
+      headers: { Origin: ORIGIN },
+      autoPong: false
+    });
+    let pingCount = 0;
+    silent.on("ping", () => { pingCount += 1; });
+    silent.on("message", (data) => packets.push(JSON.parse(String(data))));
+    await once(silent, "open");
+    await waitFor(() => closed, "a browser that stops answering WebSocket pings should be disconnected");
+    await waitFor(() => mockAi.closedConnectionCount === 1, "silent-browser cleanup should close the game socket");
+    assert(pingCount > 0, "the bridge probes browser liveness with protocol pings");
+  } finally {
+    await bridge.close();
+    await mockAi.close();
+    key.close();
+  }
+});
+
+test("CLI exits after an authenticated browser requests bridge disconnect", async () => {
+  const key = createTestKey();
+  const mockAi = await startMockAiServer();
+  const cliPath = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
+  const child = spawn(process.execPath, [
+    cliPath,
+    "browser",
+    "start",
+    "--ai-host", "127.0.0.1",
+    "--ai-port", String(mockAi.port),
+    "--ws-host", "127.0.0.1",
+    "--ws-port", "0",
+    "--browser-origin", ORIGIN,
+    "--session-token", TOKEN,
+    "--key-path", key.path,
+    "--account", "",
+    "--character", "Matthew_mage"
+  ], { cwd: process.cwd(), stdio: ["ignore", "pipe", "pipe"] });
+  let output = "";
+  child.stdout.setEncoding("utf8").on("data", (chunk) => { output += chunk; });
+  child.stderr.setEncoding("utf8").on("data", (chunk) => { output += chunk; });
+  const exited = once(child, "exit") as Promise<[number | null, NodeJS.Signals | null]>;
+
+  try {
+    await waitFor(() => output.includes("bridge listening on"), "CLI should announce the browser bridge");
+    const port = Number(output.match(/bridge listening on ws:\/\/127\.0\.0\.1:(\d+)\//)?.[1]);
+    assert(Number.isInteger(port) && port > 0, "CLI should report its assigned bridge port");
+    const browser = await connectBrowser(port);
+    browser.ws.send(JSON.stringify({ type: "bridge_disconnect" }));
+    const [exitCode] = await exited;
+    assert.equal(exitCode, 0, "CLI should exit cleanly after bridge shutdown");
+    await waitFor(() => mockAi.closedConnectionCount === 1, "CLI shutdown should close the upstream game socket");
+  } finally {
+    if (child.exitCode === null) {
+      child.kill("SIGTERM");
+      await exited;
+    }
     await mockAi.close();
     key.close();
   }
@@ -616,6 +901,8 @@ async function waitForError(packets: Array<Record<string, unknown>>, code: strin
 interface MockAiServer {
   port: number;
   received: Array<Record<string, unknown>>;
+  readonly connectionCount: number;
+  readonly closedConnectionCount: number;
   close: () => Promise<void>;
 }
 
@@ -626,7 +913,10 @@ async function startMockAiServer(options: {
 } = {}): Promise<MockAiServer> {
   const received: Array<Record<string, unknown>> = [];
   const sockets = new Set<net.Socket>();
+  let connectionCount = 0;
+  let closedConnectionCount = 0;
   const server = net.createServer((socket) => {
+    connectionCount += 1;
     sockets.add(socket);
     socket.setEncoding("utf8");
     let buffer = "";
@@ -638,6 +928,9 @@ async function startMockAiServer(options: {
     if (options.sendOversizedLineAfterHello) {
       setTimeout(() => socket.write("x".repeat(1024 * 1024 + 1)), 20);
     }
+    socket.on("error", () => {
+      // Bridge shutdown may reset the loopback test connection while closing the CLI process.
+    });
     socket.on("data", (chunk) => {
       buffer += String(chunk);
       let newline = buffer.indexOf("\n");
@@ -652,7 +945,10 @@ async function startMockAiServer(options: {
         newline = buffer.indexOf("\n");
       }
     });
-    socket.on("close", () => sockets.delete(socket));
+    socket.on("close", () => {
+      sockets.delete(socket);
+      closedConnectionCount += 1;
+    });
   });
 
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
@@ -660,6 +956,8 @@ async function startMockAiServer(options: {
   return {
     port: address.port,
     received,
+    get connectionCount() { return connectionCount; },
+    get closedConnectionCount() { return closedConnectionCount; },
     close: async () => {
       for (const socket of sockets) {
         socket.destroy();
@@ -773,6 +1071,31 @@ async function waitFor(predicate: () => boolean, message: string) {
     await delay(20);
   }
   throw new Error(message);
+}
+
+function hasReadyBrowserSession(packets: Array<Record<string, unknown>>) {
+  return packets.some((packet) => packet.type === "session_ready" || (packet.type === "session_state" && packet.state === "ready"));
+}
+
+async function waitForStatusState(port: number, token: string, state: string) {
+  const deadline = Date.now() + 3_000;
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/__incarnate/status`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (response.ok) {
+        const payload = await response.json() as Record<string, unknown>;
+        if (payload.state === state) {
+          return;
+        }
+      }
+    } catch (_error) {
+      // A closing bridge may stop accepting status requests between retries.
+    }
+    await delay(10);
+  }
+  throw new Error(`Timed out waiting for browser bridge state ${state}.`);
 }
 
 async function delay(ms: number) {

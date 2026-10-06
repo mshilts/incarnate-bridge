@@ -28,6 +28,7 @@ type CommonOptions = TransportOptions & {
   repoRoot: string;
   account: string;
   keyLabel: string;
+  ownerKeyLabel: string;
   targetKeyLabel: string;
   keyPath: string;
   targetKeyPath: string;
@@ -37,6 +38,9 @@ type CommonOptions = TransportOptions & {
   wsPort: number;
   browserOrigin: string;
   sessionToken: string;
+  instanceId: string;
+  ownerHost: string;
+  ownerAccount: string;
   bootstrapLocal: boolean;
 };
 
@@ -62,6 +66,10 @@ Common options:
   --ssh-host <host>       SSH host alias for ssh transport
   --key-path <path>       Local private key path
   --account <name>        Account name
+  --owner-host <host>     Host identity reported by browser status
+  --owner-account <name>  Account identity reported by browser status
+  --owner-key-label <name> Key profile identity reported by browser status
+  --instance-id <id>      Stable owner identity for this bridge instance
 
 ${LEGACY_CLI_NAME} is an alias for Incarnate compatibility.
 `;
@@ -109,6 +117,7 @@ function parseCommonOptions(args: string[]): CommonOptions {
     repoRoot: envAny(["BRIDGE_REPO_ROOT", "INCARNATE_REPO_ROOT"], process.cwd()),
     account: envAny(["BRIDGE_ACCOUNT", "INCARNATE_ACCOUNT"], gameConfig.defaultAccount),
     keyLabel: envAny(["BRIDGE_KEY_LABEL", "INCARNATE_KEY_LABEL"], gameConfig.defaultKeyLabel),
+    ownerKeyLabel: envAny(["BRIDGE_OWNER_KEY_LABEL", "INCARNATE_OWNER_KEY_LABEL"], ""),
     targetKeyLabel: envAny(["BRIDGE_TARGET_KEY_LABEL", "INCARNATE_TARGET_KEY_LABEL"], ""),
     keyPath: envAny(["BRIDGE_KEY_PATH", "INCARNATE_KEY_PATH"], gameConfig.defaultKeyPath),
     targetKeyPath: envAny(["BRIDGE_TARGET_KEY_PATH", "INCARNATE_TARGET_KEY_PATH"], ""),
@@ -118,6 +127,9 @@ function parseCommonOptions(args: string[]): CommonOptions {
     wsPort: Number(envAny(["BRIDGE_BROWSER_BRIDGE_PORT", "INCARNATE_BROWSER_BRIDGE_PORT"], String(gameConfig.defaultBrowserBridgePort))),
     browserOrigin: envAny(["BRIDGE_BROWSER_ORIGIN", "INCARNATE_BROWSER_ORIGIN"], ""),
     sessionToken: envAny(["BRIDGE_BROWSER_SESSION_TOKEN", "INCARNATE_BROWSER_SESSION_TOKEN"], randomUUID()),
+    instanceId: envAny(["BRIDGE_INSTANCE_ID", "INCARNATE_INSTANCE_ID"], randomUUID()),
+    ownerHost: envAny(["BRIDGE_OWNER_HOST", "INCARNATE_OWNER_HOST"], ""),
+    ownerAccount: envAny(["BRIDGE_OWNER_ACCOUNT", "INCARNATE_OWNER_ACCOUNT"], ""),
     bootstrapLocal: envAny(["BRIDGE_BOOTSTRAP_LOCAL_DEV", "INCARNATE_BOOTSTRAP_LOCAL_DEV"], "false") === "true"
   };
   for (let index = 0; index < args.length; index += 1) {
@@ -137,6 +149,8 @@ function parseCommonOptions(args: string[]): CommonOptions {
       options.account = next();
     } else if (arg === "--key-label") {
       options.keyLabel = next();
+    } else if (arg === "--owner-key-label") {
+      options.ownerKeyLabel = next();
     } else if (arg === "--target-key-label" || arg === "--new-key-label" || arg === "--remove-key-label") {
       options.targetKeyLabel = next();
     } else if (arg === "--key-path") {
@@ -155,6 +169,12 @@ function parseCommonOptions(args: string[]): CommonOptions {
       options.browserOrigin = next();
     } else if (arg === "--session-token") {
       options.sessionToken = next();
+    } else if (arg === "--instance-id") {
+      options.instanceId = next();
+    } else if (arg === "--owner-host") {
+      options.ownerHost = next();
+    } else if (arg === "--owner-account") {
+      options.ownerAccount = next();
     } else if (arg === "--game-config") {
       next();
     } else if (arg === "--bootstrap-local-dev") {
@@ -415,30 +435,48 @@ async function commandBrowserStart(options: CommonOptions) {
     tunnel = openedTunnel;
     resolved = { host: openedTunnel.host, port: openedTunnel.port };
   }
-  const server = await startBrowserBridgeServer({
-    gameConfig: options.gameConfig,
-    aiHost: resolved.host,
-    aiPort: resolved.port,
-    wsHost: options.wsHost,
-    wsPort: options.wsPort,
-    account: options.account,
-    keyLabel: options.keyLabel,
-    keyPath: options.keyPath,
-    character: options.character,
-    radius: options.radius,
-    sessionToken: options.sessionToken,
-    allowedOrigin: resolvedOrigin
-  });
+  let server: Awaited<ReturnType<typeof startBrowserBridgeServer>>;
+  try {
+    server = await startBrowserBridgeServer({
+      gameConfig: options.gameConfig,
+      aiHost: resolved.host,
+      aiPort: resolved.port,
+      wsHost: options.wsHost,
+      wsPort: options.wsPort,
+      account: options.account,
+      keyLabel: options.keyLabel,
+      keyPath: options.keyPath,
+      character: options.character,
+      radius: options.radius,
+      sessionToken: options.sessionToken,
+      allowedOrigin: resolvedOrigin,
+      instanceId: options.instanceId,
+      ownerHost: options.ownerHost || (options.transport === "ssh" ? options.sshHost : options.aiHost),
+      ownerAccount: options.ownerAccount.trim() || options.account.trim(),
+      ownerKeyLabel: options.ownerKeyLabel.trim() || options.keyLabel,
+      keyFingerprint: fingerprintPublicKey(publicKey)
+    });
+  } catch (error) {
+    tunnel?.close();
+    throw error;
+  }
   process.stdout.write(`${options.gameConfig.displayName} bridge listening on ws://${options.wsHost}:${server.port}/?token=${options.sessionToken}\n`);
   process.stdout.write(`Allowed browser origin: ${resolvedOrigin}\n`);
-  const stop = async () => {
-    await server.close();
-    tunnel?.close();
-    process.exit(0);
+  process.stdout.write(`Bridge instance: ${options.instanceId}\n`);
+  let stopPromise: Promise<void> | null = null;
+  const stop = () => {
+    if (!stopPromise) {
+      stopPromise = (async () => {
+        await server.close();
+        tunnel?.close();
+      })();
+    }
+    return stopPromise;
   };
-  process.once("SIGINT", stop);
-  process.once("SIGTERM", stop);
-  await new Promise<void>(() => {});
+  process.once("SIGINT", () => { void stop(); });
+  process.once("SIGTERM", () => { void stop(); });
+  await server.closed;
+  await stop();
 }
 
 async function main() {
