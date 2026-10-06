@@ -8,7 +8,7 @@ import { BRIDGE_RESERVED_BROWSER_MESSAGE_TYPES, defineBridgeGameConfig, type Bro
 test("bridge exposes only reserved local browser messages, not a game command catalog", () => {
   const reserved = new Set<string>(BRIDGE_RESERVED_BROWSER_MESSAGE_TYPES);
   assert.equal(reserved.size, BRIDGE_RESERVED_BROWSER_MESSAGE_TYPES.length, "reserved local browser messages should not contain duplicates");
-  assert.deepEqual([...reserved].sort(), ["bridge_device_key", "client_debug"]);
+  assert.deepEqual([...reserved].sort(), ["bridge_device_key", "bridge_disconnect", "client_debug"]);
 
   for (const command of [
     "guild_command",
