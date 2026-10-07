@@ -32,3 +32,7 @@ export interface BrowserBridgeServer {
     port: number;
 }
 export declare function startBrowserBridgeServer(options: BrowserBridgeOptions): Promise<BrowserBridgeServer>;
+export declare function splitBoundedAiLines(buffer: string, chunk: string, maxLineBytes?: number): {
+    lines: string[];
+    suffix: string;
+};

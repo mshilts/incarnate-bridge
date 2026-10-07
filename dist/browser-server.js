@@ -10,6 +10,8 @@ const BRIDGE_RESERVED_MESSAGES = new Set(BRIDGE_RESERVED_BROWSER_MESSAGE_TYPES);
 const MAX_BROWSER_MESSAGE_BYTES = 64 * 1024;
 const MAX_WEBSOCKET_FRAME_BYTES = 1024 * 1024;
 const MAX_AI_LINE_BYTES = 1024 * 1024;
+const CAPABILITIES_WAIT_MS = 500;
+const CAPABILITIES_ACK_WAIT_MS = 5_000;
 const STATUS_PATH = "/__incarnate/status";
 const DEFAULT_LIFECYCLE_TIMINGS = {
     initialAttachTimeoutMs: 60_000,
@@ -191,6 +193,17 @@ class BridgeSession {
     socketCloseTimer = null;
     pendingBrowserPing = null;
     browserPingSequence = 0;
+    aiHelloReceived = false;
+    helloPacket = null;
+    authenticationStarted = false;
+    activationPending = false;
+    capabilitiesSent = false;
+    acceptedBrowserCapabilities = null;
+    attachmentAck = null;
+    pendingBrowserCommands = [];
+    capabilitiesTimer = null;
+    activationTimer = null;
+    activationPingToken = "";
     constructor(options, gameConfig, timings, onClosed) {
         this.options = options;
         this.gameConfig = gameConfig;
@@ -238,6 +251,13 @@ class BridgeSession {
             }
         }
         this.socket = socket;
+        this.activationPending = true;
+        this.capabilitiesSent = false;
+        this.acceptedBrowserCapabilities = null;
+        this.attachmentAck = null;
+        this.pendingBrowserCommands = [];
+        this.activationPingToken = "";
+        this.clearActivationTimers();
         socket.on("message", (payload) => this.onBrowserMessage(socket, generation, payload));
         socket.on("pong", (payload) => {
             if (this.socket === socket &&
@@ -249,7 +269,20 @@ class BridgeSession {
         socket.on("close", () => this.detachSocket(socket, generation));
         socket.on("error", () => this.detachSocket(socket, generation));
         this.startBrowserHeartbeat(socket, generation);
-        this.replayBrowserSession();
+        this.forward({ type: "session_state", state: "connecting", message: "Preparing browser game session." });
+        this.capabilitiesTimer = setTimeout(() => {
+            if (this.socketGeneration === generation && this.socket === socket
+                && !this.capabilitiesSent && this.acceptedBrowserCapabilities === null) {
+                this.acceptedBrowserCapabilities = {};
+                this.beginAttachmentActivation();
+            }
+        }, CAPABILITIES_WAIT_MS);
+        this.activationTimer = setTimeout(() => {
+            if (this.activationPending && this.socketGeneration === generation) {
+                this.emitSessionError("browser_activation_timeout", "Game server did not confirm browser activation.");
+                this.close();
+            }
+        }, CAPABILITIES_ACK_WAIT_MS);
     }
     close() {
         if (this.closed) {
@@ -257,6 +290,7 @@ class BridgeSession {
         }
         this.closed = true;
         this.clearBrowserTimers();
+        this.clearActivationTimers();
         this.aiSocket?.destroy();
         this.aiSocket = null;
         const socket = this.socket;
@@ -331,6 +365,17 @@ class BridgeSession {
             this.forwardDeviceKey();
             return;
         }
+        if (type === this.gameConfig.protocol.clientCapabilities) {
+            if (this.activationPending && !this.capabilitiesSent) {
+                this.acceptedBrowserCapabilities = parsed;
+                if (this.capabilitiesTimer) {
+                    clearTimeout(this.capabilitiesTimer);
+                    this.capabilitiesTimer = null;
+                }
+                this.beginAttachmentActivation();
+            }
+            return;
+        }
         if (!type) {
             this.emitSessionError("invalid_browser_command", "Browser bridge command type must be a non-empty string.");
             return;
@@ -361,20 +406,28 @@ class BridgeSession {
                 this.pendingTellTargets = this.pendingTellTargets.slice(this.pendingTellTargets.length - 20);
             }
         }
+        if (this.activationPending) {
+            if (this.pendingBrowserCommands.length >= 32) {
+                this.emitSessionError("browser_activation_pending", "Too many commands arrived before browser activation.");
+                return;
+            }
+            this.pendingBrowserCommands.push(command);
+            return;
+        }
         this.sendAiCommand(this.prepareBrowserCommand(command));
     }
     onAiData(chunk) {
-        this.aiBuffer += chunk;
-        if (Buffer.byteLength(this.aiBuffer, "utf8") > MAX_AI_LINE_BYTES) {
-            this.emitSessionError("ai_message_too_large", "AI socket sent an oversized JSON line.");
-            this.emitSessionState("error", "AI socket protocol error.");
-            this.close();
+        let split;
+        try {
+            split = splitBoundedAiLines(this.aiBuffer, chunk);
+        }
+        catch (_error) {
+            this.rejectOversizedAiLine();
             return;
         }
-        let newlineIndex = this.aiBuffer.indexOf("\n");
-        while (newlineIndex >= 0) {
-            const line = this.aiBuffer.slice(0, newlineIndex).trim();
-            this.aiBuffer = this.aiBuffer.slice(newlineIndex + 1);
+        this.aiBuffer = split.suffix;
+        for (const rawLine of split.lines) {
+            const line = rawLine.trim();
             if (line.length > 0) {
                 try {
                     this.onAiPacket(JSON.parse(line));
@@ -386,12 +439,32 @@ class BridgeSession {
                     return;
                 }
             }
-            newlineIndex = this.aiBuffer.indexOf("\n");
+            if (this.closed) {
+                return;
+            }
         }
+    }
+    rejectOversizedAiLine() {
+        this.emitSessionError("ai_message_too_large", "AI socket sent an oversized JSON line.");
+        this.emitSessionState("error", "AI socket protocol error.");
+        this.close();
     }
     onAiPacket(packet) {
         const type = String(packet.type ?? "");
         const protocol = this.gameConfig.protocol;
+        if (type === "client_capabilities_ack") {
+            if (this.activationPending && this.capabilitiesSent
+                && packet.attachmentId === String(this.socketGeneration)) {
+                this.attachmentAck = packet;
+            }
+            return;
+        }
+        if (type === protocol.pong && packet.token === this.activationPingToken) {
+            if (this.activationPending && this.capabilitiesSent) {
+                this.finishAttachmentActivation();
+            }
+            return;
+        }
         if (type === protocol.ping) {
             this.writeRawAiCommand({
                 schemaVersion: 1,
@@ -415,29 +488,10 @@ class BridgeSession {
             }
         }
         if (type === protocol.hello) {
+            this.aiHelloReceived = true;
+            this.helloPacket = packet;
             this.emitSessionState("connected", `Received ${this.gameConfig.displayName} session hello.`);
-            this.writeRawAiCommand({
-                schemaVersion: 1,
-                type: protocol.clientCapabilities,
-                viewportDeltas: true
-            });
-            this.forwardDeviceKey();
-            if (this.options.account.trim().length > 0) {
-                this.emitSessionState("authenticating", "Authenticating browser bridge.");
-                this.pendingChallengeKind = "auth";
-                this.writeRawAiCommand({
-                    schemaVersion: 1,
-                    type: protocol.authBegin,
-                    account: this.options.account,
-                    keyLabel: this.options.keyLabel
-                });
-            }
-            else {
-                this.forward(packet);
-                this.emitSessionState("authenticating", "Checking this device key.");
-                this.pendingChallengeKind = "auth";
-                this.sendKeyProbe();
-            }
+            this.beginAttachmentActivation();
             return;
         }
         if (type === protocol.authChallenge) {
@@ -458,6 +512,7 @@ class BridgeSession {
             return;
         }
         if (type === protocol.keyProbeResult) {
+            this.lastLifecyclePacket = packet;
             this.forward(packet);
             const status = String(packet.status ?? "");
             if (protocol.keyProbeSetupStatuses.includes(status)) {
@@ -470,6 +525,7 @@ class BridgeSession {
             return;
         }
         if (type === protocol.authResult) {
+            this.lastLifecyclePacket = packet;
             const ok = protocol.authResultAcceptedFields.some((field) => packet[field] === true);
             this.authenticated = ok;
             if (ok && typeof packet.account === "string") {
@@ -485,7 +541,9 @@ class BridgeSession {
             this.lastLifecyclePacket = packet;
             this.forward(packet);
             if (this.autoSelectConfiguredCharacter()) {
-                this.selectConfiguredCharacter();
+                if (!this.activationPending) {
+                    this.selectConfiguredCharacter();
+                }
             }
             else {
                 this.emitSessionState("ready", "Character roster available.");
@@ -511,13 +569,17 @@ class BridgeSession {
             this.lastLifecyclePacket = readyPacket;
             this.forward(readyPacket);
             this.emitSessionState("ready", "Browser session ready.");
-            this.sendAiCommand({ type: protocol.queryViewport });
+            if (!this.activationPending) {
+                this.sendAiCommand({ type: protocol.queryViewport, complete: true });
+            }
             return;
         }
         if (type === "action_result") {
             this.log(`forward ${type}: ${String(packet.message ?? "")}`);
         }
-        this.forward(packet);
+        if (!this.activationPending) {
+            this.forward(packet);
+        }
     }
     sendAiCommand(command, injectSchemaVersion = true) {
         const packet = injectSchemaVersion ? { schemaVersion: 1, ...command } : command;
@@ -638,9 +700,15 @@ class BridgeSession {
         this.sessionState = state;
         this.sessionStateMessage = message;
         this.log(`session_state ${state}: ${message}`);
-        this.forward({ type: "session_state", state, message });
+        if (!this.activationPending || state !== "ready") {
+            this.forward({ type: "session_state", state, message });
+        }
     }
     forward(packet) {
+        if (this.activationPending
+            && !["session_state", "session_error", "bridge_device_key"].includes(String(packet.type ?? ""))) {
+            return;
+        }
         if (this.socket && this.socket.readyState === this.socket.OPEN) {
             this.socket.send(JSON.stringify(packet));
         }
@@ -650,6 +718,13 @@ class BridgeSession {
             return;
         }
         this.socket = null;
+        this.activationPending = true;
+        this.capabilitiesSent = false;
+        this.acceptedBrowserCapabilities = null;
+        this.attachmentAck = null;
+        this.pendingBrowserCommands = [];
+        this.activationPingToken = "";
+        this.clearActivationTimers();
         this.clearHeartbeatTimer();
         const detachedGeneration = ++this.socketGeneration;
         if (this.detachTimer) {
@@ -744,12 +819,115 @@ class BridgeSession {
         }
         if (this.sessionState === "ready" && this.activeCharacter.length > 0) {
             this.sendAiCommand({ type: this.gameConfig.protocol.status });
-            this.sendAiCommand({ type: this.gameConfig.protocol.queryViewport });
+            this.sendAiCommand({ type: this.gameConfig.protocol.queryViewport, complete: true });
+        }
+    }
+    beginAttachmentActivation() {
+        if (!this.activationPending || this.capabilitiesSent || !this.aiHelloReceived
+            || this.acceptedBrowserCapabilities === null || this.socket === null) {
+            return;
+        }
+        const browserCapabilities = this.acceptedBrowserCapabilities;
+        const attachmentId = this.socketGeneration;
+        this.capabilitiesSent = true;
+        if (this.capabilitiesTimer) {
+            clearTimeout(this.capabilitiesTimer);
+            this.capabilitiesTimer = null;
+        }
+        this.activationPingToken = `browser-attachment:${attachmentId}:${randomUUID()}`;
+        this.writeRawAiCommand({
+            schemaVersion: 1,
+            type: this.gameConfig.protocol.clientCapabilities,
+            clientKind: "browser",
+            attachmentId: String(attachmentId),
+            generation: attachmentId,
+            viewportDeltas: browserCapabilities.viewportDeltas === true,
+            compactMapStaticV1: browserCapabilities.compactMapStaticV1 === true
+        });
+        this.writeRawAiCommand({
+            schemaVersion: 1,
+            type: this.gameConfig.protocol.ping,
+            token: this.activationPingToken
+        });
+    }
+    finishAttachmentActivation() {
+        this.clearActivationTimers();
+        this.activationPending = false;
+        this.activationPingToken = "";
+        if (this.attachmentAck) {
+            this.forward(this.attachmentAck);
+            this.attachmentAck = null;
+        }
+        if (this.helloPacket) {
+            this.forward(this.helloPacket);
+        }
+        if (!this.authenticationStarted) {
+            this.authenticationStarted = true;
+            this.forwardDeviceKey();
+            if (this.options.account.trim().length > 0) {
+                this.emitSessionState("authenticating", "Authenticating browser bridge.");
+                this.pendingChallengeKind = "auth";
+                this.writeRawAiCommand({
+                    schemaVersion: 1,
+                    type: this.gameConfig.protocol.authBegin,
+                    account: this.options.account,
+                    keyLabel: this.options.keyLabel
+                });
+            }
+            else {
+                this.emitSessionState("authenticating", "Checking this device key.");
+                this.pendingChallengeKind = "auth";
+                this.sendKeyProbe();
+            }
+        }
+        else {
+            this.replayBrowserSession();
+        }
+        if (this.autoSelectConfiguredCharacter()
+            && this.lastLifecyclePacket
+            && this.gameConfig.protocol.characterList.includes(String(this.lastLifecyclePacket.type ?? ""))
+            && !this.pendingBrowserCommands.some((command) => command.type === this.gameConfig.protocol.characterSelect)) {
+            this.selectConfiguredCharacter();
+        }
+        const pending = this.pendingBrowserCommands;
+        this.pendingBrowserCommands = [];
+        for (const command of pending) {
+            this.sendAiCommand(this.prepareBrowserCommand(command));
+        }
+    }
+    clearActivationTimers() {
+        if (this.capabilitiesTimer) {
+            clearTimeout(this.capabilitiesTimer);
+            this.capabilitiesTimer = null;
+        }
+        if (this.activationTimer) {
+            clearTimeout(this.activationTimer);
+            this.activationTimer = null;
         }
     }
     log(message) {
         process.stdout.write(`[bridge:${this.sessionId}] ${message}\n`);
     }
+}
+export function splitBoundedAiLines(buffer, chunk, maxLineBytes = MAX_AI_LINE_BYTES) {
+    const combined = buffer + chunk;
+    const lines = [];
+    let start = 0;
+    let newline = combined.indexOf("\n", start);
+    while (newline >= 0) {
+        const line = combined.slice(start, newline);
+        if (Buffer.byteLength(line, "utf8") > maxLineBytes) {
+            throw new RangeError("AI line exceeds the accepted byte limit.");
+        }
+        lines.push(line);
+        start = newline + 1;
+        newline = combined.indexOf("\n", start);
+    }
+    const suffix = combined.slice(start);
+    if (Buffer.byteLength(suffix, "utf8") > maxLineBytes) {
+        throw new RangeError("Unfinished AI line exceeds the accepted byte limit.");
+    }
+    return { lines, suffix };
 }
 function normalizeName(value) {
     return String(value ?? "").trim().toLowerCase();

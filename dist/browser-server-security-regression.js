@@ -138,6 +138,10 @@ async function startMockAiServer() {
     };
 }
 function handleAiCommand(socket, packet) {
+    if (packet.type === "ping") {
+        send(socket, { schemaVersion: 1, type: "pong", token: packet.token });
+        return;
+    }
     if (packet.type === "auth_begin") {
         send(socket, { schemaVersion: 1, type: "auth_challenge", signingPayload: "security-regression-challenge" });
         return;

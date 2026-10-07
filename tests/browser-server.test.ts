@@ -9,12 +9,28 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { WebSocket } from "ws";
-import { startBrowserBridgeServer } from "../src/browser-server.js";
+import { splitBoundedAiLines, startBrowserBridgeServer } from "../src/browser-server.js";
 import { defineBridgeGameConfig } from "../src/config.js";
 import { ensureKeyPair } from "../src/openssh.js";
 
 const TOKEN = "unit-test-token";
 const ORIGIN = "http://127.0.0.1:4174";
+
+test("AI framing bounds complete lines and the remaining suffix independently", () => {
+  const first = JSON.stringify({ type: "map_static", data: "x".repeat(600_000) }) + "\n";
+  const second = JSON.stringify({ type: "status", data: "y".repeat(600_000) }) + "\n";
+  const split = splitBoundedAiLines("", first + second);
+  assert.equal(split.lines.length, 2);
+  assert.equal(split.suffix, "");
+  assert.equal(JSON.parse(split.lines[1]).type, "status");
+  assert.deepEqual(splitBoundedAiLines("a", "b\nnext").lines, ["ab"]);
+  assert.equal(splitBoundedAiLines("a", "b\nnext").suffix, "next");
+  assert.deepEqual(splitBoundedAiLines("", "abc\r\n", 4).lines, ["abc\r"]);
+  assert.throws(() => splitBoundedAiLines("", "abcd\r\n", 4), RangeError);
+  assert.deepEqual(splitBoundedAiLines("é", "\n", 2).lines, ["é"]);
+  assert.throws(() => splitBoundedAiLines("é", "x\n", 2), RangeError);
+  assert.throws(() => splitBoundedAiLines("", "z".repeat(5), 4), RangeError);
+});
 
 test("browser bridge rejects bad token and wrong origin before opening a session", async () => {
   const key = createTestKey();
@@ -237,6 +253,101 @@ test("a replacement browser gets ownership without reconnecting the replaced soc
   }
 });
 
+test("replacement browser negotiates before map replay on the same game socket", async () => {
+  const key = createTestKey();
+  const mockAi = await startMockAiServer({
+    sendMapOnQuery: true, ackCapabilities: true, sendPriorMapOnCapabilities: true
+  });
+  const bridge = await startBrowserBridgeServer({
+    aiHost: "127.0.0.1", aiPort: mockAi.port,
+    wsHost: "127.0.0.1", wsPort: 0,
+    account: "matt", keyLabel: "device", keyPath: key.path,
+    character: "Matthew_mage", radius: 6,
+    sessionToken: TOKEN, allowedOrigin: ORIGIN
+  });
+
+  try {
+    const first = await connectBrowser(bridge.port);
+    first.ws.send(JSON.stringify({ type: "client_capabilities", viewportDeltas: true, compactMapStaticV1: true }));
+    await waitFor(() => first.packets.some((packet) => packet.type === "map_static"), "compact first baseline");
+    assert(first.packets.some((packet) => packet.type === "map_static" && packet.cellEncoding === "palette-v1"));
+
+    const second = await connectBrowser(bridge.port);
+    await waitFor(() => second.packets.some((packet) => packet.type === "map_static"), "legacy replacement baseline");
+    assert(second.packets.some((packet) => packet.type === "map_static" && Array.isArray(packet.cells)));
+    assert(!second.packets.some((packet) => packet.type === "map_static" && packet.cellEncoding === "palette-v1"),
+      "old browser never sees the previous attachment's compact mode");
+    const capabilities = mockAi.received.filter((packet) => packet.type === "client_capabilities");
+    assert.equal(capabilities.length, 2);
+    assert.equal(capabilities[0].compactMapStaticV1, true);
+    assert.equal(capabilities[1].compactMapStaticV1, false);
+    const third = await connectBrowser(bridge.port);
+    third.ws.send(JSON.stringify({ type: "client_capabilities", compactMapStaticV1: true }));
+    await waitFor(() => third.packets.some((packet) => packet.type === "map_static"), "compact replacement baseline");
+    assert(third.packets.some((packet) => packet.type === "map_static" && packet.cellEncoding === "palette-v1"));
+    assert.equal(mockAi.received.filter((packet) => packet.type === "client_capabilities").at(-1)?.viewportDeltas, false,
+      "missing capability fields reset rather than inherit the old attachment");
+    assert.equal(mockAi.connectionCount, 1);
+    third.ws.close();
+    await once(third.ws, "close");
+  } finally {
+    await bridge.close();
+    await mockAi.close();
+    key.close();
+  }
+});
+
+test("browser capabilities survive a delayed game hello", async () => {
+  const key = createTestKey();
+  const mockAi = await startMockAiServer({ helloDelayMs: 650, sendMapOnQuery: true, ackCapabilities: true });
+  const bridge = await startBrowserBridgeServer({
+    aiHost: "127.0.0.1", aiPort: mockAi.port,
+    wsHost: "127.0.0.1", wsPort: 0,
+    account: "matt", keyLabel: "device", keyPath: key.path,
+    character: "Matthew_mage", radius: 6,
+    sessionToken: TOKEN, allowedOrigin: ORIGIN
+  });
+  try {
+    const client = await connectBrowser(bridge.port);
+    client.ws.send(JSON.stringify({ type: "client_capabilities", compactMapStaticV1: true }));
+    await waitFor(() => client.packets.some((packet) => packet.type === "map_static"), "compact delayed-hello map");
+    assert(client.packets.some((packet) => packet.type === "map_static" && packet.cellEncoding === "palette-v1"));
+    const ackIndex = client.packets.findIndex((packet) => packet.type === "client_capabilities_ack");
+    const staticIndex = client.packets.findIndex((packet) => packet.type === "map_static");
+    assert(ackIndex >= 0 && ackIndex < staticIndex, "activation ack precedes map data");
+  } finally {
+    await bridge.close();
+    await mockAi.close();
+    key.close();
+  }
+});
+
+test("replacing a browser during key probe replays the account setup result", async () => {
+  const key = createTestKey();
+  const mockAi = await startMockAiServer({ delayProbeResultMs: 100 });
+  const bridge = await startBrowserBridgeServer({
+    aiHost: "127.0.0.1", aiPort: mockAi.port,
+    wsHost: "127.0.0.1", wsPort: 0,
+    account: "", keyLabel: "device", keyPath: key.path,
+    character: "", radius: 6,
+    sessionToken: TOKEN, allowedOrigin: ORIGIN
+  });
+  try {
+    const first = await connectBrowser(bridge.port);
+    first.ws.send(JSON.stringify({ type: "client_capabilities", compactMapStaticV1: true }));
+    await waitFor(() => mockAi.received.some((packet) => packet.type === "auth_key_probe"), "key probe started");
+    const second = await connectBrowser(bridge.port);
+    await waitFor(() => second.packets.some((packet) => packet.type === "auth_key_probe_result"),
+      "replacement should receive the account setup result");
+    second.ws.close();
+    await once(second.ws, "close");
+  } finally {
+    await bridge.close();
+    await mockAi.close();
+    key.close();
+  }
+});
+
 test("browser bridge expires without an initial browser attachment", async () => {
   const key = createTestKey();
   const mockAi = await startMockAiServer();
@@ -377,6 +488,35 @@ test("oversized AI JSON lines close the browser session", async () => {
       () => client.ws.readyState === WebSocket.CLOSING || client.ws.readyState === WebSocket.CLOSED,
       "browser socket should close after oversized AI JSON"
     );
+  } finally {
+    await bridge.close();
+    await mockAi.close();
+    key.close();
+  }
+});
+
+test("coalesced AI lines are bounded individually", async () => {
+  const key = createTestKey();
+  const mockAi = await startMockAiServer({ sendCoalescedValidLinesAfterHello: true });
+  const bridge = await startBrowserBridgeServer({
+    aiHost: "127.0.0.1",
+    aiPort: mockAi.port,
+    wsHost: "127.0.0.1",
+    wsPort: 0,
+    account: "",
+    keyLabel: "device",
+    keyPath: key.path,
+    character: "",
+    radius: 6,
+    sessionToken: TOKEN,
+    allowedOrigin: ORIGIN
+  });
+
+  try {
+    const client = await connectBrowser(bridge.port);
+    await waitFor(() => client.packets.filter((packet) => packet.type === "large_test").length === 2,
+      "both individually valid lines should reach the browser");
+    assert.equal(client.ws.readyState, WebSocket.OPEN);
   } finally {
     await bridge.close();
     await mockAi.close();
@@ -910,6 +1050,12 @@ async function startMockAiServer(options: {
   recognizeProbe?: boolean;
   sendInvalidJsonAfterHello?: boolean;
   sendOversizedLineAfterHello?: boolean;
+  sendCoalescedValidLinesAfterHello?: boolean;
+  sendMapOnQuery?: boolean;
+  ackCapabilities?: boolean;
+  sendPriorMapOnCapabilities?: boolean;
+  helloDelayMs?: number;
+  delayProbeResultMs?: number;
 } = {}): Promise<MockAiServer> {
   const received: Array<Record<string, unknown>> = [];
   const sockets = new Set<net.Socket>();
@@ -920,13 +1066,28 @@ async function startMockAiServer(options: {
     sockets.add(socket);
     socket.setEncoding("utf8");
     let buffer = "";
-    send(socket, { schemaVersion: 1, type: "hello" });
-    send(socket, { schemaVersion: 1, type: "ping", token: "unit-ping" });
+    let compactMapStaticV1 = false;
+    let characterSelected = false;
+    const sendHello = () => {
+      send(socket, { schemaVersion: 1, type: "hello" });
+      send(socket, { schemaVersion: 1, type: "ping", token: "unit-ping" });
+    };
+    if (options.helloDelayMs) {
+      setTimeout(sendHello, options.helloDelayMs);
+    } else {
+      sendHello();
+    }
     if (options.sendInvalidJsonAfterHello) {
       setTimeout(() => socket.write("{invalid-json\n"), 20);
     }
     if (options.sendOversizedLineAfterHello) {
       setTimeout(() => socket.write("x".repeat(1024 * 1024 + 1)), 20);
+    }
+    if (options.sendCoalescedValidLinesAfterHello) {
+      setTimeout(() => {
+        const line = JSON.stringify({ type: "large_test", data: "x".repeat(600_000) }) + "\n";
+        socket.write(line + line);
+      }, 800);
     }
     socket.on("error", () => {
       // Bridge shutdown may reset the loopback test connection while closing the CLI process.
@@ -940,6 +1101,28 @@ async function startMockAiServer(options: {
         if (line) {
           const packet = JSON.parse(line) as Record<string, unknown>;
           received.push(packet);
+          if (packet.type === "client_capabilities") {
+            if (characterSelected && options.sendPriorMapOnCapabilities) {
+              send(socket, { type: "map_static", mapName: "Stale Map", widthCells: 1, heightCells: 1,
+                cellEncoding: "palette-v1", cellPalette: [{ tile: "stale" }], cellIds: [1] });
+            }
+            compactMapStaticV1 = packet.compactMapStaticV1 === true;
+            if (options.ackCapabilities) {
+              send(socket, { type: "client_capabilities_ack", attachmentId: packet.attachmentId,
+                accepted: { compactMapStaticV1 } });
+            }
+          }
+          if (packet.type === "query_viewport" && options.sendMapOnQuery) {
+            send(socket, compactMapStaticV1
+              ? { type: "map_static", mapName: "Test Map", widthCells: 1, heightCells: 1,
+                  cellEncoding: "palette-v1", cellPalette: [{ tile: "floor", blocking: false, tags: [] }], cellIds: [1] }
+              : { type: "map_static", mapName: "Test Map", widthCells: 1, heightCells: 1,
+                  cells: [{ x: 0, y: 0, tile: "floor", blocking: false, tags: [] }] });
+            send(socket, { type: "viewport", mapName: "Test Map", cells: [], entities: [], status: {} });
+          }
+          if (packet.type === "character_select") {
+            characterSelected = true;
+          }
           handleAiCommand(socket, packet, options);
         }
         newline = buffer.indexOf("\n");
@@ -967,9 +1150,16 @@ async function startMockAiServer(options: {
   };
 }
 
-function handleAiCommand(socket: net.Socket, packet: Record<string, unknown>, options: { recognizeProbe?: boolean } = {}) {
+function handleAiCommand(socket: net.Socket, packet: Record<string, unknown>, options: {
+  recognizeProbe?: boolean;
+  delayProbeResultMs?: number;
+} = {}) {
+  if (packet.type === "ping") {
+    send(socket, { schemaVersion: 1, type: "pong", token: packet.token });
+    return;
+  }
   if (packet.type === "auth_key_probe") {
-    send(socket, {
+    const result = {
       schemaVersion: 1,
       type: "auth_key_probe_result",
       status: options.recognizeProbe ? "recognized" : "unknown",
@@ -977,7 +1167,12 @@ function handleAiCommand(socket: net.Socket, packet: Record<string, unknown>, op
       keyLabel: "device",
       fingerprint: String(packet.fingerprint ?? ""),
       message: options.recognizeProbe ? "Signing in." : "This device is not registered yet."
-    });
+    };
+    if (options.delayProbeResultMs) {
+      setTimeout(() => send(socket, result), options.delayProbeResultMs);
+    } else {
+      send(socket, result);
+    }
     if (options.recognizeProbe) {
       send(socket, { schemaVersion: 1, type: "auth_challenge", signingPayload: "auth_key_probe:unit-challenge" });
     }
@@ -1033,7 +1228,9 @@ async function startCustomProtocolAiServer(): Promise<MockAiServer> {
         if (line) {
           const packet = JSON.parse(line) as Record<string, unknown>;
           received.push(packet);
-          if (packet.type === "login_begin") {
+          if (packet.type === "ping") {
+            send(socket, { schemaVersion: 1, type: "pong", token: packet.token });
+          } else if (packet.type === "login_begin") {
             send(socket, { schemaVersion: 1, type: "login_challenge", payload: "custom-protocol-challenge" });
           } else if (packet.type === "login_complete") {
             send(socket, { schemaVersion: 1, type: "login_result", ok: true, account: "player" });

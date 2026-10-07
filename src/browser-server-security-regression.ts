@@ -179,6 +179,10 @@ async function startMockAiServer(): Promise<MockAiServer> {
 }
 
 function handleAiCommand(socket: net.Socket, packet: Record<string, unknown>) {
+  if (packet.type === "ping") {
+    send(socket, { schemaVersion: 1, type: "pong", token: packet.token });
+    return;
+  }
   if (packet.type === "auth_begin") {
     send(socket, { schemaVersion: 1, type: "auth_challenge", signingPayload: "security-regression-challenge" });
     return;

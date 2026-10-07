@@ -47,12 +47,16 @@ The default flow is SSH-key challenge auth:
 
 1. Bridge connects to the game AI socket.
 2. Server sends `hello`.
-3. Bridge sends `auth_begin` or `auth_key_probe`.
-4. Server sends `auth_challenge` with a signing payload.
-5. Bridge signs locally with `ssh-keygen -Y sign`.
-6. Bridge sends `auth_complete` with the detached signature.
-7. Server verifies the signature against the registered public key.
-8. Server sends `auth_result`.
+3. Bridge collects the current browser's capabilities, sends a complete feature
+   set with its attachment generation, and waits for an ordered `pong` barrier.
+   A server that also sends `client_capabilities_ack` has that result forwarded
+   before browser lifecycle replay. Missing capability fields are false.
+4. Bridge sends `auth_begin` or `auth_key_probe`.
+5. Server sends `auth_challenge` with a signing payload.
+6. Bridge signs locally with `ssh-keygen -Y sign`.
+7. Bridge sends `auth_complete` with the detached signature.
+8. Server verifies the signature against the registered public key.
+9. Server sends `auth_result`.
 
 Account creation and key rotation use the same pattern. The bridge can provide
 local public-key metadata, but the server decides whether the operation is
@@ -76,6 +80,10 @@ The localhost WebSocket bridge:
   by local key signing
 - forwards normal game command envelopes to the AI socket
 - replies to AI heartbeat `ping` with local `pong`
+- bounds each complete upstream JSON line and its unfinished suffix separately
+- holds gameplay replay until the current browser's feature set passes the
+  ordered game-socket barrier; replacement then requests a complete viewport
+  baseline on the surviving connection
 
 Command filtering is intentionally inverted. The bridge does not maintain the
 game command catalog. If a privileged command is safe only because the bridge
