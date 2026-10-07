@@ -860,6 +860,16 @@ test("browser bridge blocks malformed, oversized, and browser-managed account co
     client.ws.send("{bad");
     await waitForError(client.packets, "invalid_browser_json");
 
+    for (const invalid of ["null", "[]", "42"]) {
+      const priorErrors = client.packets.filter((packet) => packet.type === "session_error" && packet.code === "invalid_browser_json").length;
+      client.ws.send(invalid);
+      await waitFor(
+        () => client.packets.filter((packet) => packet.type === "session_error" && packet.code === "invalid_browser_json").length > priorErrors,
+        `${invalid} must be rejected as a JSON command object`
+      );
+      assert.equal(client.ws.readyState, WebSocket.OPEN, "invalid JSON values must not crash the bridge");
+    }
+
     client.ws.send("x".repeat(70_000));
     await waitForError(client.packets, "browser_message_too_large");
 

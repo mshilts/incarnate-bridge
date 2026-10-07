@@ -356,6 +356,10 @@ class BridgeSession {
             this.emitSessionError("invalid_browser_json", "Browser bridge received malformed JSON.");
             return;
         }
+        if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+            this.emitSessionError("invalid_browser_json", "Browser bridge requires a JSON command object.");
+            return;
+        }
         const type = browserCommandType(parsed);
         if (type === "client_debug") {
             this.log(`client_debug ${String(parsed.source ?? "browser")}:${String(parsed.event ?? "event")} ${truncateDebugDetail(parsed.detail)}`);
