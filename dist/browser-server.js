@@ -846,7 +846,8 @@ class BridgeSession {
             attachmentId: String(attachmentId),
             generation: attachmentId,
             viewportDeltas: browserCapabilities.viewportDeltas === true,
-            compactMapStaticV1: browserCapabilities.compactMapStaticV1 === true
+            compactMapStaticV1: browserCapabilities.compactMapStaticV1 === true,
+            compactCellsV1: browserCapabilities.compactCellsV1 === true
         });
         this.writeRawAiCommand({
             schemaVersion: 1,
