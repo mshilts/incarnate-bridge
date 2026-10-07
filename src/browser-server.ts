@@ -919,6 +919,7 @@ class BridgeSession {
       attachmentId: String(attachmentId),
       generation: attachmentId,
       viewportDeltas: browserCapabilities.viewportDeltas === true,
+      viewportStatusPatchV1: browserCapabilities.viewportStatusPatchV1 === true,
       compactMapStaticV1: browserCapabilities.compactMapStaticV1 === true,
       compactCellsV1: browserCapabilities.compactCellsV1 === true
     });

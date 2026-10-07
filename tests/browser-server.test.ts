@@ -268,7 +268,8 @@ test("replacement browser negotiates before map replay on the same game socket",
 
   try {
     const first = await connectBrowser(bridge.port);
-    first.ws.send(JSON.stringify({ type: "client_capabilities", viewportDeltas: true, compactMapStaticV1: true }));
+    first.ws.send(JSON.stringify({ type: "client_capabilities", viewportDeltas: true,
+      viewportStatusPatchV1: true, compactMapStaticV1: true }));
     await waitFor(() => first.packets.some((packet) => packet.type === "map_static"), "compact first baseline");
     assert(first.packets.some((packet) => packet.type === "map_static" && packet.cellEncoding === "palette-v1"));
 
@@ -280,14 +281,18 @@ test("replacement browser negotiates before map replay on the same game socket",
     const capabilities = mockAi.received.filter((packet) => packet.type === "client_capabilities");
     assert.equal(capabilities.length, 2);
     assert.equal(capabilities[0].compactMapStaticV1, true);
+    assert.equal(capabilities[0].viewportStatusPatchV1, true);
     assert.equal(capabilities[1].compactMapStaticV1, false);
+    assert.equal(capabilities[1].viewportDeltas, false, "viewport deltas reset for a legacy replacement");
     assert.equal(capabilities[1].compactCellsV1, false, "broad cell support resets for a legacy replacement");
+    assert.equal(capabilities[1].viewportStatusPatchV1, false, "status patches reset for a legacy replacement");
     const third = await connectBrowser(bridge.port);
-    third.ws.send(JSON.stringify({ type: "client_capabilities", compactMapStaticV1: true, compactCellsV1: true }));
+    third.ws.send(JSON.stringify({ type: "client_capabilities", viewportDeltas: true,
+      viewportStatusPatchV1: true, compactMapStaticV1: true, compactCellsV1: true }));
     await waitFor(() => third.packets.some((packet) => packet.type === "map_static"), "compact replacement baseline");
     assert(third.packets.some((packet) => packet.type === "map_static" && packet.cellEncoding === "palette-v1"));
-    assert.equal(mockAi.received.filter((packet) => packet.type === "client_capabilities").at(-1)?.viewportDeltas, false,
-      "missing capability fields reset rather than inherit the old attachment");
+    assert.equal(mockAi.received.filter((packet) => packet.type === "client_capabilities").at(-1)?.viewportStatusPatchV1, true,
+      "a new attachment can opt back in to status patches");
     assert.equal(mockAi.received.filter((packet) => packet.type === "client_capabilities").at(-1)?.compactCellsV1, true,
       "the complete cell codec opt-in reaches the current Java attachment");
     assert.equal(mockAi.connectionCount, 1);
