@@ -570,7 +570,7 @@ class BridgeSession {
                 character: this.activeCharacter,
                 mapName: this.activeMapName
             };
-            this.lastLifecyclePacket = readyPacket;
+            this.lastLifecyclePacket = packet;
             this.forward(readyPacket);
             this.emitSessionState("ready", "Browser session ready.");
             if (!this.activationPending) {
