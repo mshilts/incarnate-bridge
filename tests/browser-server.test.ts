@@ -205,9 +205,9 @@ test("browser reconnect cancels the detach timer and stale timer generation", as
   }
 });
 
-test("a replacement browser gets ownership without reconnecting the replaced socket", async () => {
+test("a replacement browser replays the original character selection without reconnecting the game socket", async () => {
   const key = createTestKey();
-  const mockAi = await startMockAiServer();
+  const mockAi = await startMockAiServer({ recognizeProbe: true, selectionId: "replacement-selection-17" });
   const bridge = await startBrowserBridgeServer({
     aiHost: "127.0.0.1",
     aiPort: mockAi.port,
@@ -232,16 +232,22 @@ test("a replacement browser gets ownership without reconnecting the replaced soc
   try {
     const first = await connectBrowser(bridge.port);
     await waitFor(() => hasReadyBrowserSession(first.packets), "first browser should be ready");
+    assert(first.packets.some((packet) => packet.type === "character_selected"
+      && packet.selectionId === "replacement-selection-17"), "initial browser receives the upstream selection id");
 
     const second = await connectBrowser(bridge.port);
     const [closeCode, closeReason] = await once(first.ws, "close") as [number, Buffer];
     assert.equal(closeCode, 4001, "replacement is explicit so the old browser does not auto-reconnect");
     assert.match(closeReason.toString(), /replaced/i);
     await waitFor(() => hasReadyBrowserSession(second.packets), "replacement browser should resume the session");
+    assert(second.packets.some((packet) => packet.type === "character_selected"
+      && packet.selectionId === "replacement-selection-17"), "replacement replays the original selection id");
     assert.equal((await fetch(`http://127.0.0.1:${bridge.port}/__incarnate/status`, {
       headers: { Authorization: `Bearer ${TOKEN}` }
     }).then((response) => response.json()) as Record<string, unknown>).state, "attached");
     assert.equal(mockAi.connectionCount, 1, "replacing a browser keeps one authenticated game session");
+    assert.equal(mockAi.received.filter((packet) => packet.type === "character_select").length, 1,
+      "replaying selection does not select the character again");
 
     second.ws.send(JSON.stringify({ type: "bridge_disconnect" }));
     await once(second.ws, "close");
@@ -1072,6 +1078,7 @@ interface MockAiServer {
 
 async function startMockAiServer(options: {
   recognizeProbe?: boolean;
+  selectionId?: string;
   sendInvalidJsonAfterHello?: boolean;
   sendOversizedLineAfterHello?: boolean;
   sendCoalescedValidLinesAfterHello?: boolean;
@@ -1177,6 +1184,7 @@ async function startMockAiServer(options: {
 function handleAiCommand(socket: net.Socket, packet: Record<string, unknown>, options: {
   recognizeProbe?: boolean;
   delayProbeResultMs?: number;
+  selectionId?: string;
 } = {}) {
   if (packet.type === "ping") {
     send(socket, { schemaVersion: 1, type: "pong", token: packet.token });
@@ -1225,7 +1233,8 @@ function handleAiCommand(socket: net.Socket, packet: Record<string, unknown>, op
       schemaVersion: 1,
       type: "character_selected",
       character: String(packet.character ?? "Matthew_mage"),
-      mapName: "Sordon's Castle"
+      mapName: "Sordon's Castle",
+      ...(options.selectionId ? { selectionId: options.selectionId } : {})
     });
     send(socket, { schemaVersion: 1, type: "viewport", mapName: "Sordon's Castle", width: 1, height: 1, tiles: [] });
   }
