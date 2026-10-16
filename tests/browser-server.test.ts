@@ -275,7 +275,7 @@ test("replacement browser negotiates before map replay on the same game socket",
   try {
     const first = await connectBrowser(bridge.port);
     first.ws.send(JSON.stringify({ type: "client_capabilities", viewportDeltas: true,
-      viewportStatusPatchV1: true, compactMapStaticV1: true, compactMapStaticV2: true }));
+      viewportStatusPatchV1: true, worldViewportV1: true, compactMapStaticV1: true, compactMapStaticV2: true }));
     await waitFor(() => first.packets.some((packet) => packet.type === "map_static"), "compact first baseline");
     assert(first.packets.some((packet) => packet.type === "map_static" && packet.cellEncoding === "palette-v1"));
 
@@ -290,15 +290,19 @@ test("replacement browser negotiates before map replay on the same game socket",
     assert.equal(capabilities[0].compactMapStaticV2, true,
       "the explicit static v2 opt-in reaches the current Java attachment");
     assert.equal(capabilities[0].viewportStatusPatchV1, true);
+    assert.equal(capabilities[0].worldViewportV1, true,
+      "the continuous world viewport opt-in reaches the current Java attachment");
     assert.equal(capabilities[1].compactMapStaticV1, false);
     assert.equal(capabilities[1].compactMapStaticV2, false,
       "static v2 support resets for a legacy replacement");
     assert.equal(capabilities[1].viewportDeltas, false, "viewport deltas reset for a legacy replacement");
     assert.equal(capabilities[1].compactCellsV1, false, "broad cell support resets for a legacy replacement");
     assert.equal(capabilities[1].viewportStatusPatchV1, false, "status patches reset for a legacy replacement");
+    assert.equal(capabilities[1].worldViewportV1, false,
+      "continuous world viewport support resets for a legacy replacement");
     const third = await connectBrowser(bridge.port);
     third.ws.send(JSON.stringify({ type: "client_capabilities", viewportDeltas: true,
-      viewportStatusPatchV1: true, compactMapStaticV1: true, compactMapStaticV2: true, compactCellsV1: true }));
+      viewportStatusPatchV1: true, worldViewportV1: true, compactMapStaticV1: true, compactMapStaticV2: true, compactCellsV1: true }));
     await waitFor(() => third.packets.some((packet) => packet.type === "map_static"), "compact replacement baseline");
     assert(third.packets.some((packet) => packet.type === "map_static" && packet.cellEncoding === "palette-v1"));
     assert.equal(mockAi.received.filter((packet) => packet.type === "client_capabilities").at(-1)?.viewportStatusPatchV1, true,
@@ -307,9 +311,16 @@ test("replacement browser negotiates before map replay on the same game socket",
       "the complete cell codec opt-in reaches the current Java attachment");
     assert.equal(mockAi.received.filter((packet) => packet.type === "client_capabilities").at(-1)?.compactMapStaticV2, true,
       "a new attachment can opt back in to static v2");
+    assert.equal(mockAi.received.filter((packet) => packet.type === "client_capabilities").at(-1)?.worldViewportV1, true,
+      "a new attachment can opt back in to continuous world viewports");
+    const fourth = await connectBrowser(bridge.port);
+    fourth.ws.send(JSON.stringify({ type: "client_capabilities", worldViewportV1: "true" }));
+    await waitFor(() => fourth.packets.some((packet) => packet.type === "map_static"), "invalid opt-in replacement baseline");
+    assert.equal(mockAi.received.filter((packet) => packet.type === "client_capabilities").at(-1)?.worldViewportV1, false,
+      "only a boolean true opts in to continuous world viewports");
     assert.equal(mockAi.connectionCount, 1);
-    third.ws.close();
-    await once(third.ws, "close");
+    fourth.ws.close();
+    await once(fourth.ws, "close");
   } finally {
     await bridge.close();
     await mockAi.close();

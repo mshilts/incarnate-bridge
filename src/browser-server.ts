@@ -920,6 +920,7 @@ class BridgeSession {
       generation: attachmentId,
       viewportDeltas: browserCapabilities.viewportDeltas === true,
       viewportStatusPatchV1: browserCapabilities.viewportStatusPatchV1 === true,
+      worldViewportV1: browserCapabilities.worldViewportV1 === true,
       compactMapStaticV1: browserCapabilities.compactMapStaticV1 === true,
       compactMapStaticV2: browserCapabilities.compactMapStaticV2 === true,
       compactCellsV1: browserCapabilities.compactCellsV1 === true
