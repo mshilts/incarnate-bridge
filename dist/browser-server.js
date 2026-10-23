@@ -850,6 +850,7 @@ class BridgeSession {
             worldViewportV1: browserCapabilities.worldViewportV1 === true,
             compactMapStaticV1: browserCapabilities.compactMapStaticV1 === true,
             compactMapStaticV2: browserCapabilities.compactMapStaticV2 === true,
+            compactMapStaticPackedV1: browserCapabilities.compactMapStaticPackedV1 === true,
             compactCellsV1: browserCapabilities.compactCellsV1 === true
         });
         this.writeRawAiCommand({

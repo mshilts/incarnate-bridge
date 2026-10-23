@@ -259,6 +259,34 @@ test("a replacement browser replays the original character selection without rec
   }
 });
 
+test("packed static payloads pass unchanged and legacy replacement receives ordinary cells", async () => {
+  const key = createTestKey();
+  const mockAi = await startMockAiServer({ sendMapOnQuery: true, sendPackedMapOnQuery: true, ackCapabilities: true });
+  const bridge = await startBrowserBridgeServer({
+    aiHost: "127.0.0.1", aiPort: mockAi.port, wsHost: "127.0.0.1", wsPort: 0,
+    account: "matt", keyLabel: "device", keyPath: key.path, character: "Matthew_mage", radius: 6,
+    sessionToken: TOKEN, allowedOrigin: ORIGIN
+  });
+  try {
+    const first = await connectBrowser(bridge.port);
+    first.ws.send(JSON.stringify({ type: "client_capabilities", compactMapStaticPackedV1: true, compactMapStaticV2: true }));
+    await waitFor(() => first.packets.some((packet) => packet.type === "map_static"), "packed map baseline");
+    const packed = first.packets.find((packet) => packet.type === "map_static")!;
+    assert.equal(packed.cellEncoding, "palette-v2-packed");
+    assert.equal(packed.cellIdBits, 1);
+    assert.equal(packed.cellIdsPacked, "gA==");
+    assert.deepEqual(packed.cellPalette, [["floor", 1]]);
+    assert.deepEqual(packed.cellProperties, [{ blocking: false, tags: [] }]);
+    assert.equal("cellIds" in packed, false);
+    const second = await connectBrowser(bridge.port);
+    await waitFor(() => second.packets.some((packet) => packet.type === "map_static"), "legacy replacement baseline");
+    assert.deepEqual(second.packets.find((packet) => packet.type === "map_static")!.cells,
+      [{ x: 0, y: 0, tile: "floor", blocking: false, tags: [] }]);
+    assert.equal(mockAi.connectionCount, 1);
+    second.ws.close(); await once(second.ws, "close");
+  } finally { await bridge.close(); await mockAi.close(); key.close(); }
+});
+
 test("replacement browser negotiates before map replay on the same game socket", async () => {
   const key = createTestKey();
   const mockAi = await startMockAiServer({
@@ -275,7 +303,7 @@ test("replacement browser negotiates before map replay on the same game socket",
   try {
     const first = await connectBrowser(bridge.port);
     first.ws.send(JSON.stringify({ type: "client_capabilities", viewportDeltas: true,
-      viewportStatusPatchV1: true, worldViewportV1: true, compactMapStaticV1: true, compactMapStaticV2: true }));
+      viewportStatusPatchV1: true, worldViewportV1: true, compactMapStaticV1: true, compactMapStaticV2: true, compactMapStaticPackedV1: true }));
     await waitFor(() => first.packets.some((packet) => packet.type === "map_static"), "compact first baseline");
     assert(first.packets.some((packet) => packet.type === "map_static" && packet.cellEncoding === "palette-v1"));
 
@@ -289,12 +317,14 @@ test("replacement browser negotiates before map replay on the same game socket",
     assert.equal(capabilities[0].compactMapStaticV1, true);
     assert.equal(capabilities[0].compactMapStaticV2, true,
       "the explicit static v2 opt-in reaches the current Java attachment");
+    assert.equal(capabilities[0].compactMapStaticPackedV1, true, "explicit packed IDs reach Java");
     assert.equal(capabilities[0].viewportStatusPatchV1, true);
     assert.equal(capabilities[0].worldViewportV1, true,
       "the continuous world viewport opt-in reaches the current Java attachment");
     assert.equal(capabilities[1].compactMapStaticV1, false);
     assert.equal(capabilities[1].compactMapStaticV2, false,
       "static v2 support resets for a legacy replacement");
+    assert.equal(capabilities[1].compactMapStaticPackedV1, false, "packed IDs reset for a legacy replacement");
     assert.equal(capabilities[1].viewportDeltas, false, "viewport deltas reset for a legacy replacement");
     assert.equal(capabilities[1].compactCellsV1, false, "broad cell support resets for a legacy replacement");
     assert.equal(capabilities[1].viewportStatusPatchV1, false, "status patches reset for a legacy replacement");
@@ -302,7 +332,7 @@ test("replacement browser negotiates before map replay on the same game socket",
       "continuous world viewport support resets for a legacy replacement");
     const third = await connectBrowser(bridge.port);
     third.ws.send(JSON.stringify({ type: "client_capabilities", viewportDeltas: true,
-      viewportStatusPatchV1: true, worldViewportV1: true, compactMapStaticV1: true, compactMapStaticV2: true, compactCellsV1: true }));
+      viewportStatusPatchV1: true, worldViewportV1: true, compactMapStaticV1: true, compactMapStaticV2: true, compactMapStaticPackedV1: true, compactCellsV1: true }));
     await waitFor(() => third.packets.some((packet) => packet.type === "map_static"), "compact replacement baseline");
     assert(third.packets.some((packet) => packet.type === "map_static" && packet.cellEncoding === "palette-v1"));
     assert.equal(mockAi.received.filter((packet) => packet.type === "client_capabilities").at(-1)?.viewportStatusPatchV1, true,
@@ -311,13 +341,17 @@ test("replacement browser negotiates before map replay on the same game socket",
       "the complete cell codec opt-in reaches the current Java attachment");
     assert.equal(mockAi.received.filter((packet) => packet.type === "client_capabilities").at(-1)?.compactMapStaticV2, true,
       "a new attachment can opt back in to static v2");
+    assert.equal(mockAi.received.filter((packet) => packet.type === "client_capabilities").at(-1)?.compactMapStaticPackedV1, true,
+      "replacement can explicitly opt back in to packed IDs");
     assert.equal(mockAi.received.filter((packet) => packet.type === "client_capabilities").at(-1)?.worldViewportV1, true,
       "a new attachment can opt back in to continuous world viewports");
     const fourth = await connectBrowser(bridge.port);
-    fourth.ws.send(JSON.stringify({ type: "client_capabilities", worldViewportV1: "true" }));
+    fourth.ws.send(JSON.stringify({ type: "client_capabilities", worldViewportV1: "true", compactMapStaticPackedV1: "true" }));
     await waitFor(() => fourth.packets.some((packet) => packet.type === "map_static"), "invalid opt-in replacement baseline");
     assert.equal(mockAi.received.filter((packet) => packet.type === "client_capabilities").at(-1)?.worldViewportV1, false,
       "only a boolean true opts in to continuous world viewports");
+    assert.equal(mockAi.received.filter((packet) => packet.type === "client_capabilities").at(-1)?.compactMapStaticPackedV1, false,
+      "packed IDs require boolean true");
     assert.equal(mockAi.connectionCount, 1);
     fourth.ws.close();
     await once(fourth.ws, "close");
@@ -1094,6 +1128,7 @@ async function startMockAiServer(options: {
   sendOversizedLineAfterHello?: boolean;
   sendCoalescedValidLinesAfterHello?: boolean;
   sendMapOnQuery?: boolean;
+  sendPackedMapOnQuery?: boolean;
   ackCapabilities?: boolean;
   sendPriorMapOnCapabilities?: boolean;
   helloDelayMs?: number;
@@ -1109,6 +1144,7 @@ async function startMockAiServer(options: {
     socket.setEncoding("utf8");
     let buffer = "";
     let compactMapStaticV1 = false;
+    let compactMapStaticPackedV1 = false;
     let characterSelected = false;
     const sendHello = () => {
       send(socket, { schemaVersion: 1, type: "hello" });
@@ -1149,13 +1185,18 @@ async function startMockAiServer(options: {
                 cellEncoding: "palette-v1", cellPalette: [{ tile: "stale" }], cellIds: [1] });
             }
             compactMapStaticV1 = packet.compactMapStaticV1 === true;
+            compactMapStaticPackedV1 = packet.compactMapStaticPackedV1 === true;
             if (options.ackCapabilities) {
               send(socket, { type: "client_capabilities_ack", attachmentId: packet.attachmentId,
                 accepted: { compactMapStaticV1 } });
             }
           }
           if (packet.type === "query_viewport" && options.sendMapOnQuery) {
-            send(socket, compactMapStaticV1
+            if (options.sendPackedMapOnQuery && compactMapStaticPackedV1) {
+              send(socket, { type: "map_static", mapName: "Test Map", widthCells: 1, heightCells: 1,
+                cellEncoding: "palette-v2-packed", cellIdBits: 1, cellIdsPacked: "gA==",
+                cellPalette: [["floor", 1]], cellProperties: [{ blocking: false, tags: [] }] });
+            } else send(socket, compactMapStaticV1
               ? { type: "map_static", mapName: "Test Map", widthCells: 1, heightCells: 1,
                   cellEncoding: "palette-v1", cellPalette: [{ tile: "floor", blocking: false, tags: [] }], cellIds: [1] }
               : { type: "map_static", mapName: "Test Map", widthCells: 1, heightCells: 1,
