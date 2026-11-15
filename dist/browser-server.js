@@ -851,7 +851,10 @@ class BridgeSession {
             compactMapStaticV1: browserCapabilities.compactMapStaticV1 === true,
             compactMapStaticV2: browserCapabilities.compactMapStaticV2 === true,
             compactMapStaticPackedV1: browserCapabilities.compactMapStaticPackedV1 === true,
-            compactCellsV1: browserCapabilities.compactCellsV1 === true
+            compactCellsV1: browserCapabilities.compactCellsV1 === true,
+            ...(Object.hasOwn(browserCapabilities, "assetDeliveryVersion")
+                ? { assetDeliveryVersion: browserCapabilities.assetDeliveryVersion }
+                : {})
         });
         this.writeRawAiCommand({
             schemaVersion: 1,

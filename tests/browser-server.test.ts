@@ -302,7 +302,7 @@ test("replacement browser negotiates before map replay on the same game socket",
 
   try {
     const first = await connectBrowser(bridge.port);
-    first.ws.send(JSON.stringify({ type: "client_capabilities", viewportDeltas: true,
+    first.ws.send(JSON.stringify({ type: "client_capabilities", assetDeliveryVersion: 3, viewportDeltas: true,
       viewportStatusPatchV1: true, worldViewportV1: true, compactMapStaticV1: true, compactMapStaticV2: true, compactMapStaticPackedV1: true }));
     await waitFor(() => first.packets.some((packet) => packet.type === "map_static"), "compact first baseline");
     assert(first.packets.some((packet) => packet.type === "map_static" && packet.cellEncoding === "palette-v1"));
@@ -317,6 +317,8 @@ test("replacement browser negotiates before map replay on the same game socket",
     assert.equal(capabilities[0].compactMapStaticV1, true);
     assert.equal(capabilities[0].compactMapStaticV2, true,
       "the explicit static v2 opt-in reaches the current Java attachment");
+    assert.equal(capabilities[0].assetDeliveryVersion, 3,
+      "the stable asset-delivery protocol version reaches the current Java attachment");
     assert.equal(capabilities[0].compactMapStaticPackedV1, true, "explicit packed IDs reach Java");
     assert.equal(capabilities[0].viewportStatusPatchV1, true);
     assert.equal(capabilities[0].worldViewportV1, true,
@@ -324,6 +326,8 @@ test("replacement browser negotiates before map replay on the same game socket",
     assert.equal(capabilities[1].compactMapStaticV1, false);
     assert.equal(capabilities[1].compactMapStaticV2, false,
       "static v2 support resets for a legacy replacement");
+    assert.equal("assetDeliveryVersion" in capabilities[1], false,
+      "a replacement without asset delivery support does not inherit the previous browser version");
     assert.equal(capabilities[1].compactMapStaticPackedV1, false, "packed IDs reset for a legacy replacement");
     assert.equal(capabilities[1].viewportDeltas, false, "viewport deltas reset for a legacy replacement");
     assert.equal(capabilities[1].compactCellsV1, false, "broad cell support resets for a legacy replacement");
