@@ -56,7 +56,7 @@ const MAX_BROWSER_MESSAGE_BYTES = 64 * 1024;
 const MAX_WEBSOCKET_FRAME_BYTES = 1024 * 1024;
 const MAX_AI_LINE_BYTES = 1024 * 1024;
 const CAPABILITIES_WAIT_MS = 500;
-const CAPABILITIES_ACK_WAIT_MS = 5_000;
+const ACTIVATION_SLOW_NOTICE_MS = 5_000;
 const STATUS_PATH = "/__incarnate/status";
 const DEFAULT_LIFECYCLE_TIMINGS: BrowserBridgeLifecycleTimings = {
   initialAttachTimeoutMs: 60_000,
@@ -333,10 +333,10 @@ class BridgeSession {
     }, CAPABILITIES_WAIT_MS);
     this.activationTimer = setTimeout(() => {
       if (this.activationPending && this.socketGeneration === generation) {
-        this.emitSessionError("browser_activation_timeout", "Game server did not confirm browser activation.");
-        this.close();
+        this.log("browser activation is still waiting for the game server; keeping the session open.");
+        this.forward({ type: "session_state", state: "connecting", message: "Still waiting for the game server to prepare the browser session." });
       }
-    }, CAPABILITIES_ACK_WAIT_MS);
+    }, ACTIVATION_SLOW_NOTICE_MS);
   }
 
   close() {

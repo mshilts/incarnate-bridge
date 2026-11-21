@@ -391,6 +391,31 @@ test("browser capabilities survive a delayed game hello", async () => {
   }
 });
 
+test("activation survives a game hello delayed beyond the former five-second timeout", async () => {
+  const key = createTestKey();
+  const mockAi = await startMockAiServer({ helloDelayMs: 5_300, sendMapOnQuery: true, ackCapabilities: true });
+  const bridge = await startBrowserBridgeServer({
+    aiHost: "127.0.0.1", aiPort: mockAi.port, wsHost: "127.0.0.1", wsPort: 0,
+    account: "matt", keyLabel: "device", keyPath: key.path, character: "Matthew_mage", radius: 6,
+    sessionToken: TOKEN, allowedOrigin: ORIGIN
+  });
+  try {
+    const client = await connectBrowser(bridge.port);
+    client.ws.send(JSON.stringify({ type: "client_capabilities", compactMapStaticV1: true }));
+    await waitFor(() => client.packets.some((packet) => packet.type === "map_static"), "late hello should activate", 7_000);
+    assert.equal(client.ws.readyState, WebSocket.OPEN);
+    assert.equal(mockAi.connectionCount, 1);
+    assert.equal(mockAi.closedConnectionCount, 0);
+    assert(client.packets.some((packet) => packet.type === "session_state" && String(packet.message).includes("Still waiting")));
+    assert(!client.packets.some((packet) => packet.code === "browser_activation_timeout"));
+    assert(client.packets.some((packet) => packet.type === "map_static" && packet.cellEncoding === "palette-v1"));
+  } finally {
+    await bridge.close();
+    await mockAi.close();
+    key.close();
+  }
+});
+
 test("replacing a browser during key probe replays the account setup result", async () => {
   const key = createTestKey();
   const mockAi = await startMockAiServer({ delayProbeResultMs: 100 });
@@ -1348,8 +1373,8 @@ async function startCustomProtocolAiServer(): Promise<MockAiServer> {
   };
 }
 
-async function waitFor(predicate: () => boolean, message: string) {
-  const deadline = Date.now() + 3_000;
+async function waitFor(predicate: () => boolean, message: string, timeoutMs = 3_000) {
+  const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (predicate()) {
       return;
