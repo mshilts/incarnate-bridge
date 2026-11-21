@@ -66,6 +66,14 @@ Incarnate bridge listening on ws://127.0.0.1:8787/?token=<random-token>
 The token is required. A random website cannot use the bridge unless it knows
 the token and passes the configured browser origin policy.
 
+Clients may add `browserSessionId=<uuid>` to the WebSocket URL, using a
+lowercase UUID v4 that stays stable for the lifetime of a browser tab. Each ID
+gets its own game connection; reconnecting with the same ID replaces only that
+tab's socket. The bridge accepts up to eight sessions, including sessions in
+their reconnect grace period. Clients that omit the ID share the original
+single-session behavior. If a launch specifies a default character, only the
+first session selects it automatically; additional sessions start at the roster.
+
 The bridge keeps its game connection for up to five seconds after a browser
 socket closes so a page reload can reattach. It checks browser liveness with a
 WebSocket ping every ten seconds and a ten-second pong deadline; silent browser
@@ -79,6 +87,8 @@ instance ID, target host/account/key profile, active character, browser
 attachment state, bridge lifecycle state, upstream session state, and package
 version. The token is the same random value used in the WebSocket URL. Status
 requests without it receive `401`; unknown paths receive `404`.
+When multiple sessions exist, status describes an attached session if there is
+one, or a detached session otherwise; it is not a per-tab status endpoint.
 Status requests are accepted only from loopback addresses; remote requests with
 the token receive `403`.
 

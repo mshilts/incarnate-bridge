@@ -58,6 +58,8 @@ const MAX_AI_LINE_BYTES = 1024 * 1024;
 const CAPABILITIES_WAIT_MS = 500;
 const ACTIVATION_SLOW_NOTICE_MS = 5_000;
 const STATUS_PATH = "/__incarnate/status";
+const MAX_BROWSER_SESSIONS = 8;
+const BROWSER_SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const DEFAULT_LIFECYCLE_TIMINGS: BrowserBridgeLifecycleTimings = {
   initialAttachTimeoutMs: 60_000,
   reconnectGraceMs: 5_000,
@@ -75,7 +77,8 @@ export async function startBrowserBridgeServer(options: BrowserBridgeOptions): P
   validateLifecycleTimings(timings);
   const instanceId = options.instanceId ?? randomUUID();
   const startedAt = new Date().toISOString();
-  let session: BridgeSession | null = null;
+  // The empty key retains the original single-attachment behavior for older clients.
+  const sessions = new Map<string, BridgeSession>();
   let closing = false;
   let initialAttachTimer: ReturnType<typeof setTimeout> | null = null;
   let closePromise: Promise<void> | null = null;
@@ -106,6 +109,8 @@ export async function startBrowserBridgeServer(options: BrowserBridgeOptions): P
       writeJsonResponse(response, 410, { error: "bridge_closing" });
       return;
     }
+    const allSessions = [...sessions.values()];
+    const session = allSessions.find((candidate) => candidate.isBrowserAttached()) ?? allSessions[0];
     writeJsonResponse(response, 200, {
       version: BRIDGE_VERSION,
       instanceId,
@@ -130,7 +135,8 @@ export async function startBrowserBridgeServer(options: BrowserBridgeOptions): P
       socket.close(1001, "Bridge shutting down.");
       return;
     }
-    const token = new URL(request.url ?? "/", `http://${options.wsHost}:${options.wsPort}`).searchParams.get("token") ?? "";
+    const params = new URL(request.url ?? "/", `http://${options.wsHost}:${options.wsPort}`).searchParams;
+    const token = params.get("token") ?? "";
     const origin = String(request.headers.origin ?? "");
     if (!constantTimeEqual(token, options.sessionToken)) {
       socket.close(1008, "Invalid bridge token.");
@@ -140,18 +146,35 @@ export async function startBrowserBridgeServer(options: BrowserBridgeOptions): P
       socket.close(1008, "Origin not allowed.");
       return;
     }
+    const ids = params.getAll("browserSessionId");
+    if (ids.length > 1 || (ids.length === 1 && !BROWSER_SESSION_ID.test(ids[0]))) {
+      socket.close(1008, "Invalid browser session ID.");
+      return;
+    }
+    const id = ids[0] ?? "";
+    let session = sessions.get(id);
+    if (!session && sessions.size >= MAX_BROWSER_SESSIONS) {
+      socket.close(1008, "Browser session limit reached.");
+      return;
+    }
     if (initialAttachTimer) {
       clearTimeout(initialAttachTimer);
       initialAttachTimer = null;
     }
     if (!session || session.isClosed()) {
       let createdSession: BridgeSession;
-      createdSession = new BridgeSession(options, gameConfig, timings, () => {
-        if (session === createdSession) {
-          session = null;
+      // Only the first session owns the launcher's default character. Additional
+      // tabs must choose from the roster, even while the first is detached.
+      const sessionOptions = sessions.size === 0 ? options : { ...options, character: "" };
+      createdSession = new BridgeSession(sessionOptions, gameConfig, timings, () => {
+        if (sessions.get(id) === createdSession) {
+          sessions.delete(id);
+          if (sessions.size === 0) {
+            void closeServer();
+          }
         }
-        void closeServer();
       });
+      sessions.set(id, createdSession);
       session = createdSession;
       session.start();
     }
@@ -178,9 +201,9 @@ export async function startBrowserBridgeServer(options: BrowserBridgeOptions): P
         clearTimeout(initialAttachTimer);
         initialAttachTimer = null;
       }
-      const currentSession = session;
-      session = null;
-      currentSession?.close();
+      const currentSessions = [...sessions.values()];
+      sessions.clear();
+      for (const session of currentSessions) session.close();
       for (const socket of wsServer.clients) {
         if (socket.readyState === socket.OPEN || socket.readyState === socket.CONNECTING) {
           socket.close(1001, "Bridge session ended.");
@@ -537,14 +560,15 @@ class BridgeSession {
     if (type === "chat" && String(packet.scope ?? "").trim().toLowerCase() === "tell") {
       const from = String(packet.from ?? "").trim();
       const text = String(packet.text ?? "").trim();
-      if (normalizeName(from) === normalizeName(this.options.character)) {
+      const character = this.activeCharacter || this.options.character;
+      if (normalizeName(from) === normalizeName(character)) {
         const matchedIndex = this.pendingTellTargets.findIndex((entry) => entry.text === text);
         const matched = matchedIndex >= 0 ? this.pendingTellTargets.splice(matchedIndex, 1)[0] : this.pendingTellTargets.shift();
         if (matched?.target) {
           packet.to = matched.target;
         }
       } else if (!packet.to) {
-        packet.to = this.options.character;
+        packet.to = character;
       }
     }
     if (type === protocol.hello) {

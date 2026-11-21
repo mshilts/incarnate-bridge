@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import net from "node:net";
@@ -198,6 +199,85 @@ test("browser reconnect cancels the detach timer and stale timer generation", as
     await waitForStatusState(bridge.port, TOKEN, "detached");
     await bridge.closed;
     await waitFor(() => mockAi.closedConnectionCount === 1, "expired reconnect grace should close the game socket");
+  } finally {
+    await bridge.close();
+    await mockAi.close();
+    key.close();
+  }
+});
+
+test("browser IDs isolate sessions, replay their own selection, and clean up independently", async () => {
+  const key = createTestKey();
+  const mockAi = await startMockAiServer({ recognizeProbe: true, selectionId: "selection-17" });
+  const bridge = await startBrowserBridgeServer({
+    aiHost: "127.0.0.1", aiPort: mockAi.port, wsHost: "127.0.0.1", wsPort: 0,
+    account: "", keyLabel: "device", keyPath: key.path, character: "Matthew_mage", radius: 6,
+    sessionToken: TOKEN, allowedOrigin: ORIGIN,
+    lifecycleTimings: { reconnectGraceMs: 2_000, closeTimeoutMs: 50 }
+  });
+  try {
+    const firstId = randomUUID();
+    const first = await connectBrowser(bridge.port, firstId);
+    await waitFor(() => hasReadyBrowserSession(first.packets), "first browser should select the configured character");
+    first.ws.close();
+    await once(first.ws, "close");
+    const second = await connectBrowser(bridge.port, randomUUID());
+    await waitFor(() => hasReadyBrowserSession(second.packets), "second browser should reach the roster");
+    assert(second.packets.some((packet) => packet.type === "character_list"));
+    assert(!second.packets.some((packet) => packet.type === "character_selected"));
+    assert.equal(mockAi.received.filter((packet) => packet.type === "character_select").length, 1);
+    assert.equal(mockAi.connectionCount, 2);
+
+    const replacement = await connectBrowser(bridge.port, firstId);
+    await waitFor(() => hasReadyBrowserSession(replacement.packets), "replacement should replay its session");
+    assert(replacement.packets.some((packet) => packet.type === "character_selected" && packet.selectionId === "selection-17"));
+    assert.equal(mockAi.connectionCount, 2);
+    assert.equal(second.ws.readyState, WebSocket.OPEN);
+
+    const replay = await connectBrowser(bridge.port, firstId);
+    const [code] = await once(replacement.ws, "close") as [number, Buffer];
+    assert.equal(code, 4001);
+    await waitFor(() => hasReadyBrowserSession(replay.packets), "same-ID replacement should replay its session");
+    assert.equal(mockAi.connectionCount, 2);
+    assert.equal(mockAi.received.filter((packet) => packet.type === "character_select").length, 1);
+
+    replay.ws.send(JSON.stringify({ type: "bridge_disconnect" }));
+    await once(replay.ws, "close");
+    await waitFor(() => mockAi.closedConnectionCount === 1, "only the disconnected upstream should close");
+    assert.equal(second.ws.readyState, WebSocket.OPEN);
+    await waitForStatusState(bridge.port, TOKEN, "attached");
+    second.ws.close();
+    await bridge.closed;
+    await waitFor(() => mockAi.closedConnectionCount === 2, "the final upstream should close after grace");
+  } finally {
+    await bridge.close();
+    await mockAi.close();
+    key.close();
+  }
+});
+
+test("browser IDs reject malformed and excessive sessions without disturbing existing sessions", async () => {
+  const key = createTestKey();
+  const mockAi = await startMockAiServer();
+  const bridge = await startBrowserBridgeServer({
+    aiHost: "127.0.0.1", aiPort: mockAi.port, wsHost: "127.0.0.1", wsPort: 0,
+    account: "", keyLabel: "device", keyPath: key.path, character: "", radius: 6,
+    sessionToken: TOKEN, allowedOrigin: ORIGIN
+  });
+  try {
+    for (const query of ["browserSessionId=", "browserSessionId=bad", `browserSessionId=${randomUUID()}&browserSessionId=${randomUUID()}`]) {
+      const ws = new WebSocket(`ws://127.0.0.1:${bridge.port}?token=${TOKEN}&${query}`, { headers: { Origin: ORIGIN } });
+      const [code] = await once(ws, "close") as [number, Buffer];
+      assert.equal(code, 1008);
+    }
+    assert.equal(mockAi.connectionCount, 0);
+    const clients = await Promise.all(Array.from({ length: 8 }, () => connectBrowser(bridge.port, randomUUID())));
+    await waitFor(() => mockAi.connectionCount === 8, "all allowed sessions should connect");
+    const excess = await connectBrowser(bridge.port, randomUUID());
+    const [code] = await once(excess.ws, "close") as [number, Buffer];
+    assert.equal(code, 1008);
+    assert(clients.every(({ ws }) => ws.readyState === WebSocket.OPEN));
+    assert.equal(mockAi.connectionCount, 8);
   } finally {
     await bridge.close();
     await mockAi.close();
@@ -1125,9 +1205,9 @@ async function assertRejected(port: number, token: string, origin: string) {
   assert.equal(code, 1008);
 }
 
-async function connectBrowser(port: number) {
+async function connectBrowser(port: number, browserSessionId?: string) {
   const packets: Array<Record<string, unknown>> = [];
-  const ws = new WebSocket(`ws://127.0.0.1:${port}?token=${encodeURIComponent(TOKEN)}`, {
+  const ws = new WebSocket(`ws://127.0.0.1:${port}?token=${encodeURIComponent(TOKEN)}${browserSessionId ? `&browserSessionId=${browserSessionId}` : ""}`, {
     headers: { Origin: ORIGIN }
   });
   ws.on("message", (data) => packets.push(JSON.parse(String(data))));
